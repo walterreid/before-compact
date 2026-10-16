@@ -2,8 +2,10 @@
 # Exercises extract_tail.mjs against a synthetic transcript: manual recover, budget,
 # PreCompact write, SessionStart read-back, and the live fallback. No Claude Code needed.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; S="$HERE/../scripts/extract_tail.mjs"
+HERE="$(cd "$(dirname "$0")" && pwd)"; S="$HERE/../before-compact/scripts/extract_tail.mjs"
 W="$(mktemp -d)"; export CLAUDE_PLUGIN_DATA="$W/data"
+# The script writes status records under $HOME/.claude/before-compact/; keep the test out of the real home.
+export HOME="$W/home"; mkdir -p "$HOME"
 python3 - "$W/sess.jsonl" <<'PY'
 import json,sys
 ev=[]
@@ -29,4 +31,5 @@ grep -q "prepared by the PreCompact hook" <<<"$out" || fail "SessionStart did no
 out=$(echo '{"session_id":"other","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook)
 grep -q "extracted from the transcript" <<<"$out" || fail "live fallback not taken"
 [ "$(wc -c <<<"$out")" -lt 10000 ] || fail "hook output over the 10000-char cap"
+[ -s "$HOME/.claude/before-compact/status-t.json" ] || fail "status record not written under the test HOME"
 echo "all checks passed"

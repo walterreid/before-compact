@@ -205,6 +205,13 @@ export function register(on) {
     $.ui.toast('Compaction starting — saving your last turns')
     $.ui.invalidate('ui.render')
     return next(e)
+  }).catch(async ($, e, next) => {
+    // The hook threw or timed out. Record it where the pane shows it, and pass the
+    // event on so the settings hooks still run (or return their result if next was
+    // already called). The snapshot is lost; nothing else is.
+    lastError = `PreCompact hook ${next.error.kind}: ${next.error.message || ''}`.trim()
+    $.ui.invalidate('ui.render')
+    return next(e)
   })
 
   // After: snapshot again, pick up the script's status, show the result.
@@ -212,23 +219,32 @@ export function register(on) {
     // The settings hooks and this hook run around the same time; give the script a
     // moment to write its status before reading it, then once more to be sure.
     const settle = async () => {
-      await refreshLive($)
-      applyStatus(await readStatus($))
-      const last = compactions[compactions.length - 1]
-      if (last && last.afterTokens == null) {
-        last.afterTokens = usage ? usage.tokens : null
-        last.afterPercent = usage ? usage.percent : null
-        last.afterMessages = messageCount
-        await loadBundle($, last.bundle)
-        await probeTranscript($)
-        const t = last.injected ? `Restored ${fmtK(last.injectedTokens)} tokens of your voice` : 'Compaction done — nothing was re-injected'
-        $.ui.toast(t)
-        $.ui.log(`compaction: ${fmtK(last.beforeTokens)} → ${fmtK(last.afterTokens)} tokens, ${last.beforeMessages ?? '?'} → ${last.afterMessages ?? '?'} messages; ${last.injected ? 'bundle re-injected' : 'no bundle'}`)
+      try {
+        await refreshLive($)
+        applyStatus(await readStatus($))
+        const last = compactions[compactions.length - 1]
+        if (last && last.afterTokens == null) {
+          last.afterTokens = usage ? usage.tokens : null
+          last.afterPercent = usage ? usage.percent : null
+          last.afterMessages = messageCount
+          await loadBundle($, last.bundle)
+          await probeTranscript($)
+          const t = last.injected ? `Restored ${fmtK(last.injectedTokens)} tokens of your voice` : 'Compaction done — nothing was re-injected'
+          $.ui.toast(t)
+          $.ui.log(`compaction: ${fmtK(last.beforeTokens)} → ${fmtK(last.afterTokens)} tokens, ${last.beforeMessages ?? '?'} → ${last.afterMessages ?? '?'} messages; ${last.injected ? 'bundle re-injected' : 'no bundle'}`)
+        }
+      } catch (err) {
+        // A timer callback is outside the hook, so .catch below can't see it.
+        lastError = 'settle: ' + (err && err.message ? err.message : err)
       }
       $.ui.invalidate('ui.render')
     }
     $.clock.after(1500, settle)
     $.clock.after(6000, settle)
+    return next(e)
+  }).catch(async ($, e, next) => {
+    lastError = `SessionStart hook ${next.error.kind}: ${next.error.message || ''}`.trim()
+    $.ui.invalidate('ui.render')
     return next(e)
   })
 
