@@ -12,8 +12,11 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 | `hooks/hooks.json` → `PreCompact` | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact |
 | `hooks/hooks.json` → `SessionStart (compact)` | right after compaction | prints that bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context |
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
-| `scripts/extract_tail.mjs` | both | the original script, plus `--hook` and `--max-chars`. Every manual flag still works |
-| `hooks/register.js` → `/before-compact` | on demand | a **mod**: opens a pane beside the transcript with a live context gauge, a log of this session's compactions (tokens and messages before → after, and whether each hook reported success), and a tab showing the bundle that was re-injected. Toasts when a compaction starts and finishes |
+| `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
+| `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the `/compact` instructions and how long the summary took. With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
+| `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks |
+| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, and a tab showing the bundle that was re-injected. Toasts when a compaction starts and finishes |
+| `types/index.d.ts` | load time | declares the two `$.state` values (the log and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
 
 The two hooks are tiers 2 and 3 from the script's own header. Tier 1 (a "Compaction
 Recovery" clause in AGENTS.md that tells the agent to run `--recover`) is no longer needed
@@ -30,7 +33,8 @@ Type `/before-compact`. The pane shows:
     143 messages in context · live, refreshes every 2 s
 
     Compactions this session: 1
-    #1  14:58  manual   82k → 19k tokens   143 → 7 messages
+    #1  14:58  manual   82k → 19k tokens   143 → 7 messages   2.3 s
+        instructions: keep the plan
         PreCompact  ✓ saved 32 user turns (~1k tokens)
         SessionStart ✓ re-injected ~1k tokens (prepared by the PreCompact hook)
 
@@ -39,10 +43,19 @@ stays 0 (the mod only logs compactions it watched), but the line under it report
 it finds in the transcript on disk, and tab 2 has a **Recover from transcript** button (`g`)
 that runs `--recover` on that transcript and shows the turns before the last compaction.
 
-The numbers come from Claude Code itself (`$.session.usage()` and `$.session.messages()`);
-the ✓ marks come from a status record the script writes to `~/.claude/before-compact/` each
-time a hook fires. Two ✓ marks and a drop in the numbers is what "compaction is working"
-looks like. Press `2` for the exact text that went back into context. Esc closes the pane.
+The row's numbers are the engine's own: the `session.compact` event's result carries
+`tokensBefore` and `tokensAfter`, and its message lists give the counts before and after;
+`2.3 s` is how long the summary took. The gauge at the top is `$.session.usage()`, polled
+every 2 s. The ✓ marks come from a status record the script writes to
+`~/.claude/before-compact/` inside each settings hook; a `?` means no record arrived (press
+`r`). Two ✓ marks and a drop in the numbers is what "compaction is working" looks like.
+Press `2` for the exact text that went back into context. Esc closes the pane.
+
+The log lives in `$.state`, so saving `register.js` or `/reload-plugins` keeps it; `/clear`,
+`/resume` and `/branch` reset it, as they reset every mod's state. A subagent's own
+compaction gets a row tagged `agent <id>` with no ✓ marks: the settings hooks do not run
+for it. A precompute (the engine summarising ahead of time) and a compaction a hook vetoed
+leave no row.
 
 Mods need Claude Code v2.1.287 or later (the Desktop app bundles its own; `/status` shows
 the version). The pane works in the terminal and the Desktop app's Code tab, not in the
@@ -126,6 +139,52 @@ your voice from before compaction". Ask Claude what you said right before the co
 it should quote you.
 
 Or skip compaction: `/before-compact:recover` runs the extractor by hand.
+
+## What it runs and changes
+
+From `claude plugin validate --strict ./before-compact` on Claude Code 2.1.299, the lines
+that say what the mod touches:
+
+    ./register.js calls: $.clock.every, $.command.register, $.env.get, $.fs.exists (via findTranscript, loadBundle, readStatus), $.fs.list (via findTranscript), $.fs.read (via loadBundle, readStatus), $.fs.stat (via findTranscript), $.fs.write, $.process.run (via probeTranscript, recoverFromTranscript), $.session.cwd (via findTranscript), $.session.id, $.session.messages (via refreshLive), $.session.usage (via refreshLive), $.state.get, $.state.set, $.ui.invalidate, $.ui.log, $.ui.open, $.ui.resolve, $.ui.toast
+    ./register.js env writes: nothing
+    ./register.js env reads: HOME
+    ./register.js state writes: before-compact.compactions, before-compact.pending
+    ./register.js state reads: before-compact.compactions, before-compact.pending
+
+**Environment it reads.** The mod reads `HOME`, to find `~/.claude/before-compact/` and
+`~/.claude/projects/`. The script reads `HOME` the same way (`os.homedir()`) and
+`CLAUDE_PLUGIN_DATA`, where the bundle goes (the OS temp dir when it is unset).
+`${CLAUDE_PLUGIN_ROOT}` in `hooks.json` is expanded by Claude Code, not read by the script.
+Nothing writes to the environment.
+
+**Files it writes.**
+
+| Path | Written by | When |
+| --- | --- | --- |
+| `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` | the script, PreCompact hook | every auto or manual compaction |
+| `~/.claude/before-compact/status-<session>.json` | the script, both hooks | every compaction; the newest 50 records are kept |
+| `~/.claude/before-compact/injected-<session>.json` | the mod, `$.fs.write`, only with `inject_in_mod` on | inside the `session.compact` hook, before it returns; the script deletes it |
+
+Nothing else: the mod uses `$.state` (in memory, this session) and not `$.store`, makes
+no `$.http` call, and writes no settings. The marker and status files are small JSON.
+
+**The node subprocess.** The mod runs `node <plugin>/scripts/extract_tail.mjs` through
+`$.process.run` in two cases, both read-only: `--probe --file <transcript>` at session
+start and on **Refresh** (reads the transcript, prints one JSON line), and `--recover --role
+user --max-chars 9000 --file <transcript>` when you press `g` on tab 2. Neither runs when
+no transcript is found for the working directory. The settings hooks in `hooks.json` run
+the same script with `--hook` on PreCompact and SessionStart(compact), 20 s timeout each.
+
+**What goes into Claude's context.** With `inject_in_mod` off (the default): the
+SessionStart(compact) hook's stdout, at most 9000 characters of your last user turns after
+a one-sentence factual preamble, which Claude Code adds as hook output. With it on: the
+message list the mod returns from `session.compact` (one framing message and the last N
+user messages of the old transcript), if the engine keeps it; the script then prints
+nothing. Nothing is injected on a precompute, a vetoed compaction or a subagent's
+compaction. The toasts and `$.ui.log` lines are for you, not for Claude.
+
+Tested with Claude Code 2.1.299 (the Desktop app's bundle). The hooks module needs 2.1.287
+or later; the `session.compact` event is in the public types stamped 2.1.277.
 
 ## Known limits
 
