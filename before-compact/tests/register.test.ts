@@ -8,9 +8,11 @@
 // compaction leave no row; a subagent's compaction gets its own row; and the hook
 // returns the result untouched (phase 1 observes only).
 //
-// What it cannot prove: the order a live engine fires classic.PreCompact in relative
-// to session.compact's next(e) (the tests fire PreCompact first; the fold handles
-// either order), that a live SessionStart(compact) settings hook finishes inside the
+// The fold handles either order of the script's PreCompact record against the mod's
+// session.compact hook: the first test has the record on disk when classic.PreCompact's
+// next(e) resolves; 'the other order' test has it land only at SessionStart time, after
+// session.compact has already made the row. What the tests cannot prove: which order a
+// live engine uses, that a live SessionStart(compact) settings hook finishes inside the
 // mod hook's next(e), or that $.state survives a real reload (the kit holds state for
 // one test only).
 import { expect, mock, test } from 'claude-code/testing'
@@ -120,6 +122,25 @@ test('one compaction: PreCompact opens it, session.compact fills the numbers, Se
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the other order: PreCompact record lands after session.compact; the row still gets both marks', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  on('session.compact', () => ({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+  // classic.PreCompact fires but its status record is NOT yet on disk when next(e) resolves
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  await $.session.compact({ trigger: 'manual', messages: transcript(143) } as any)
+  // both records appear only now
+  status.log = [PRE, POST]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /PreCompact {2}✓ saved 32 user turns/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart ✓ re-injected/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#2 / })).toBeUndefined()
   await ui.unmount()
 })
 

@@ -250,8 +250,16 @@ function row(fields) {
 // Fold the script's status records into the log. Pure: takes the current list
 // and pending entry, returns the new ones. Each record is matched by its `at`,
 // so re-reading the file never duplicates a compaction.
-//   PreCompact record     → completes the pending entry's ✓ (or opens one)
+//   PreCompact record     → completes the pending entry's ✓; if session.compact has
+//                           already turned that entry into a row (the record landed
+//                           late), completes the newest row without a ✓; else opens
+//                           a pending entry
 //   SessionStart record   → completes the newest row that has no ✓ yet
+// The newest main-conversation row whose `field` is still unknown, or -1.
+function newestOpen(list, field) {
+  for (let k = list.length - 1; k >= 0; k--) if (list[k][field] == null && list[k].agentId == null) return k
+  return -1
+}
 function fold(log, list, pend) {
   for (const rec of log) {
     const key = rec.at
@@ -259,8 +267,11 @@ function fold(log, list, pend) {
     if (pend && (pend.preAt === key || pend.postAt === key)) continue
     if (rec.event === 'PreCompact') {
       const fields = { preAt: key, saved: Boolean(rec.written), savedTurns: rec.turns ?? null, savedTokens: rec.tokens_est ?? null, bundle: rec.bundle ?? null }
+      const i = pend && pend.preAt == null ? -1 : newestOpen(list, 'preAt')
       if (pend && pend.preAt == null) {
         pend = { ...pend, ...fields, trigger: pend.trigger || rec.trigger || null }
+      } else if (i >= 0) {
+        list = list.map((c, k) => (k === i ? { ...c, ...fields, trigger: c.trigger || rec.trigger || null, bundle: c.bundle || fields.bundle } : c))
       } else {
         if (pend) list = [...list, row(pend)]
         pend = { startedAt: key, trigger: rec.trigger || null, ...fields }
@@ -270,8 +281,7 @@ function fold(log, list, pend) {
       // The mod's own row already says what it appended; the script's record only
       // confirms it (a stood-down record carries the count it read from the marker).
       if (rec.mod_appended != null) Object.assign(done, { modAppended: rec.mod_appended, modChars: rec.mod_chars ?? null })
-      let i = -1
-      for (let k = list.length - 1; k >= 0; k--) if (list[k].postAt == null && list[k].agentId == null) { i = k; break }
+      const i = newestOpen(list, 'postAt')
       if (i >= 0) {
         list = list.map((c, k) => (k === i ? { ...c, ...done, bundle: c.bundle || rec.bundle || null } : c))
       } else if (pend) {
