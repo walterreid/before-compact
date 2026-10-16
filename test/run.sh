@@ -29,13 +29,30 @@ out=$(node "$S" --file "$W/sess.jsonl" --role assistant --turns 5 --raw)
 grep -q "chars truncated" <<<"$out" && fail "--raw truncated an assistant turn"
 out=$(node "$S" --file "$W/sess.jsonl" --max-chars 300)
 grep -q "budget:" <<<"$out" || fail "budget line missing"
-echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user | grep -q . && fail "PreCompact printed to stdout"
+echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user --max-chars 9000 | grep -q . && fail "PreCompact printed to stdout"
 [ -s "$W/data/precompact-t.txt" ] || fail "PreCompact wrote no bundle"
-out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+# The arc beside the bundle: both roles, assistant turns untruncated, noise stripped, no budget.
+ARC="$W/data/arc-t.txt"
+[ -s "$ARC" ] || fail "PreCompact wrote no arc"
+[ "$(wc -c <"$ARC")" -gt "$(wc -c <"$W/data/precompact-t.txt")" ] || fail "the arc is not longer than the bundle"
+grep -q "===== ASSISTANT" "$ARC" || fail "the arc has no assistant turns"
+grep -q "chars truncated" "$ARC" && fail "the arc truncated an assistant turn"
+grep -q "system-reminder" "$ARC" && fail "the arc kept harness noise"
+grep -q "budget:" "$ARC" && fail "the arc applied a character budget"
+grep -q '"arc_chars": [1-9]' "$HOME/.claude/before-compact/status-t.json" || fail "the arc's size is not in the PreCompact status record"
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000)
 grep -q "prepared by the PreCompact hook" <<<"$out" || fail "SessionStart did not use the bundle"
-out=$(echo '{"session_id":"other","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook)
+# The pointer line: names the arc's absolute path, its turn count and tokens, right after the framing.
+arc_turns=$(sed -n 's/^\[\([0-9]*\) turns .*/\1/p' "$ARC" | tail -1)
+[ -n "$arc_turns" ] || fail "no stats line at the end of the arc"
+grep -q "($arc_turns turns, ~[0-9]* tokens), is in $ARC; read that file when the task needs what was done" <<<"$out" || fail "the pointer line does not name the arc with its turn count"
+[ "$(sed -n 2p <<<"$out" | grep -c "$ARC")" = 1 ] || fail "the pointer line is not the line after the framing sentence"
+[ "$(wc -c <<<"$out")" -lt 9000 ] || fail "hook output over the 9000-char budget"
+out=$(echo '{"session_id":"other","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --max-chars 9000)
 grep -q "extracted from the transcript" <<<"$out" || fail "live fallback not taken"
-[ "$(wc -c <<<"$out")" -lt 10000 ] || fail "hook output over the 10000-char cap"
+grep -q "budget:" <<<"$out" || fail "the live fallback with both roles did not hit the budget (test transcript too short?)"
+[ "$(wc -c <<<"$out")" -lt 9000 ] || fail "hook output over the 9000-char budget on the live fallback"
+grep -q "is in $W/data/arc-other.txt;" <<<"$out" || fail "the live fallback wrote no arc or did not point at it"
 [ -s "$HOME/.claude/before-compact/status-t.json" ] || fail "status record not written under the test HOME"
 # inject_in_mod: a fresh stand-down marker from the mod makes SessionStart print nothing and record why.
 M="$HOME/.claude/before-compact/injected-t.json"
