@@ -1,7 +1,7 @@
 {
   "name": "before-compact",
-  "description": "Keeps your voice across compaction. A PreCompact hook saves the last turns verbatim; a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane.",
-  "version": "0.1.0",
+  "description": "Keeps your last turns, verbatim, across compaction. A PreCompact hook saves the last turns verbatim; a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane.",
+  "version": "0.2.0",
   "author": {
     "name": "Walter Reid",
     "email": "walterreid@gmail.com"

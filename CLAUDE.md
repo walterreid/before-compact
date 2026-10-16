@@ -7,11 +7,15 @@ this file, `test/`, and nothing Claude Code loads. Loaded in place from
 ## Dev loop
 
 1. Edit a file under `before-compact/`.
-2. `bash test/run.sh` and `claude plugin validate --strict ./before-compact` must both pass.
-3. In the running session: `/reload-plugins`, then `/before-compact`.
+2. Three checks must pass: `bash test/run.sh` (repo root), `claude plugin validate --strict
+   ./before-compact`, and `claude plugin test` (from `before-compact/`).
+3. In a running session `/reload-plugins`, then `/before-compact`. After a mod change, the
+   live check is a new session: `/before-compact`, `/compact`, one row with two ✓ marks.
 
-Terminal CLI and Desktop bundle different Claude Code versions. Mods need 2.1.287+,
-`CLAUDE_CODE_PLUGIN_DIRS` needs 2.1.280+. Check with `claude --version` and `/status`.
+Terminal CLI and Desktop bundle different Claude Code versions. Mods and `claude plugin
+test` need 2.1.287+, `CLAUDE_CODE_PLUGIN_DIRS` needs 2.1.280+. Check with `claude --version`
+and `/status`. If the terminal CLI is older, run the kit tests with the Desktop's binary
+(under `~/Library/Application Support/Claude/claude-code/<version>/…/claude`) or update it.
 
 ## Three rules, every non-trivial answer
 
@@ -36,6 +40,13 @@ and ask for the pane's `(last error: …)` line. Do not guess.
 ## Facts about the plugin that are easy to get wrong
 
 - The mod's `/before-compact` command is not namespaced; the skill is `/before-compact:recover`.
-- Hooks and the mod share state only through `~/.claude/before-compact/status-<session>.json`.
+- The script and the mod share no memory. They meet through two files under
+  `~/.claude/before-compact/`: `status-<session>.json` (the ✓ marks) and, with the
+  `inject_in_mod` experiment on, `injected-<session>.json` (the stand-down marker).
+- The row's numbers come from the `session.compact` event, not from polling; the compaction
+  log lives in `$.state` (declared in `types/index.d.ts`) and survives a reload.
+- The kit cannot prove that settings hooks finish inside the `classic.*` hooks' `next(e)`,
+  nor that appended messages survive into the next request. Say so whenever it matters.
 - `test/run.sh` sets its own `HOME` and `CLAUDE_PLUGIN_DATA`; keep it that way.
 - The session-only plugin (`@inline`) shadows any same-named copy under `~/.claude/skills/`.
+- `inject_in_mod` stays off by default until a live `/compact` has proven it.

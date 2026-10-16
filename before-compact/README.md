@@ -1,6 +1,6 @@
 # before-compact
 
-Keeps your voice across a Claude Code compaction.
+Keeps your last turns, verbatim, across a Claude Code compaction.
 
 After a compaction the model keeps the facts and loses the feel: how you talk, how each
 decision actually got made. The summary flattens that. The raw last turns don't.
@@ -127,18 +127,46 @@ session only:
 
     claude --plugin-dir /absolute/path/to/before-compact/before-compact
 
-Check it loaded with `/plugin` (the **Installed** tab lists `before-compact`, and the line under
-the tabs says `1 mod active · before-compact`) or, from the shell, `claude plugin list`, which
-shows it under **Session-only plugins** when `CLAUDE_CODE_PLUGIN_DIRS` is set.
+Check it loaded by typing `/before-compact`: the pane opens. In the terminal, `/plugin` also
+lists `before-compact` on its **Installed** tab with `1 mod active · before-compact` under the
+tabs. In the Desktop app `/plugin` opens the app's plugin browser, which does not list a
+plugin loaded from a path; type `/plugin list` as text instead, or run `claude plugin list`
+from a shell, which shows it under **Session-only plugins** when `CLAUDE_CODE_PLUGIN_DIRS` is
+set. A new session picks up the setting; a running one needs `/reload-plugins`.
 
 ## Try it
 
-In a session with some history, run `/compact`. Two things should happen: a spinner
-"Saving the last turns before compaction", then after the summary a spinner "Restoring
-your voice from before compaction". Ask Claude what you said right before the compaction;
-it should quote you.
+In a session with some history, open `/before-compact`, then run `/compact`. Two spinners
+should show, "Saving the last turns before compaction" and, after the summary, "Restoring
+your voice from before compaction", and the pane should gain one row with the engine's
+numbers, a duration, and two ✓ marks, with no `(last error: …)` line. Then ask Claude what
+you said right before the compaction; it should quote you.
 
 Or skip compaction: `/before-compact:recover` runs the extractor by hand.
+
+## Testing
+
+Three automated layers, all standalone: no session, no sign-in, no network.
+
+| Run | From | What it proves | Needs |
+| --- | --- | --- | --- |
+| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the experiment on and off, the error line | Claude Code 2.1.287 or later |
+| `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
+
+Then the live layer, the only one that proves the conversation actually changed. Nothing
+automated can trigger a real compaction (`claude plugin eval` cannot either), so this is the
+"Try it" check above, done in a new session after an install or an edit to the mod. It is
+what proves the two readings the kit takes on trust: that the settings hooks finish inside
+the mod's `classic.*` hooks' `next(e)` (both ✓ marks, no `?`), and that a live engine fires
+`session.compact` into this mod (the row's numbers). With `inject_in_mod` on, it is also the
+only check that the appended messages reached the model.
+
+After a compaction, any session can look: `/before-compact` shows the rows for compactions
+the mod watched, and tab 2's `g` button recovers the turns before an earlier one from the
+transcript. `/before-compact:recover` works in any session, compacted or not, and
+`node scripts/extract_tail.mjs --recover` works from any project directory with no session
+at all.
 
 ## What it runs and changes
 
@@ -154,7 +182,8 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   `.jsonl` under `~/.claude/projects/<this directory>/`, to pull your last turns.
 - Its own files under `~/.claude/before-compact/` and `$CLAUDE_PLUGIN_DATA`.
 - The environment variable `HOME`, to find those. No credentials, no other variables.
-- From Claude Code: the context usage, the message count, the session id, and the cwd.
+- From Claude Code: the context usage, the message count, the session id, the cwd, and,
+  inside the `session.compact` event, the messages being compacted and the result.
 
 **What it writes:**
 
@@ -168,18 +197,26 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
 
 **What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
 bundle above with a one-sentence factual framing. That is the whole point of the plugin
-and the only way it touches the conversation. The mod never writes to context.
+and, with the defaults, the only way it touches the conversation. With the `inject_in_mod`
+experiment on, the mod instead hands the engine your last user messages, unchanged, after
+the summary, and the hook prints nothing (see *The experiment*). Nothing else is ever added.
 
 **How it hooks into Claude Code** (from `claude plugin validate --strict`, with its `via` notes dropped):
 
-    ./register.js hooks: session.start, command.run{command=before-compact},
+    ./register.js hooks: config.set{key=/(^|\.)inject_(in_mod|turns|max_chars)$/},
+      session.start, command.run{command=before-compact}, session.compact,
       classic.PreCompact, classic.SessionStart{source=compact},
       ui.render{component=Pane, requestId=before-compact}
-    ./register.js calls: $.clock.after, $.clock.every, $.command.register, $.env.get,
-      $.fs.exists, $.fs.list, $.fs.read, $.fs.stat, $.process.run, $.session.cwd,
-      $.session.id, $.session.messages, $.session.usage, $.ui.invalidate, $.ui.log,
-      $.ui.open, $.ui.resolve, $.ui.toast
+    ./register.js calls: $.clock.every, $.command.register, $.env.get, $.fs.exists,
+      $.fs.list, $.fs.read, $.fs.stat, $.fs.write, $.process.run, $.session.cwd,
+      $.session.id, $.session.messages, $.session.usage, $.state.get, $.state.set,
+      $.ui.invalidate, $.ui.log, $.ui.open, $.ui.resolve, $.ui.toast
     ./register.js env reads: HOME
+    ./register.js state reads/writes: before-compact.compactions, before-compact.pending
+
+`$.fs.write` is the experiment's marker file and nothing else. The validator also notes that
+where an organization manages Claude Code, `session.compact`, `classic.PreCompact` and
+`classic.SessionStart` do not run in a plugin a person installs; the settings hooks still do.
 
 It never approves, blocks, or alters a tool call, a prompt, or a compaction.
 
@@ -195,12 +232,8 @@ data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from
   live from the transcript instead, using the compaction-summary marker to find the seam.
 - `$CLAUDE_PLUGIN_DATA` falls back to the OS temp dir when unset (for example when the
   script is run by hand), so bundles may not survive a reboot. The live path does not need them.
-- No eval suite is shipped: `claude plugin eval` cannot trigger a compaction inside a run.
-  The test is the "Try it" section above. The script itself is exercised by `test/run.sh`
-  at the repo root, and `tests/register.test.ts` drives the mod through a simulated
-  compaction with a stub mods API (`claude plugin test`, run from this folder). Neither is a
-  live session. `claude plugin validate --strict .` reads the mod and lists the events and
-  API calls it uses; run it before the first session.
+- No automated check can trigger a real compaction, `claude plugin eval` included. See
+  *Testing* for what the three automated layers prove and what only a live `/compact` can.
 - The mod reads the script's status record right after its own `classic.PreCompact` and
   `classic.SessionStart` hooks have passed the event on with `next(e)`, on the reading
   that the settings hooks run inside that `next`. There are no timers. If that reading
