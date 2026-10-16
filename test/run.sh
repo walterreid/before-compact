@@ -12,7 +12,7 @@ ev=[]
 u=lambda t: ev.append({"type":"user","message":{"role":"user","content":t}})
 a=lambda t: ev.append({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":t}]}})
 for i in range(1,31):
-    u(f"user turn {i}"); ev.append({"type":"assistant","message":{"content":[{"type":"tool_use","id":"x","name":"Bash","input":{}}]}}); a(f"assistant {i} "+"x "*100)
+    u(f"user turn {i}"); ev.append({"type":"assistant","message":{"content":[{"type":"tool_use","id":"x","name":"Bash","input":{}}]}}); a(f"assistant {i} "+"x "*(400 if i==30 else 100))  # turn 30 is 800+ chars: over the 700-char assistant default
 u("<system-reminder>noise</system-reminder>LAST BEFORE COMPACTION"); a("ok")
 u("This session is being continued from a previous conversation. Summary."); a("continuing"); u("AFTER")
 open(sys.argv[1],"w").write("".join(json.dumps(e)+"\n" for e in ev))
@@ -22,6 +22,11 @@ out=$(node "$S" --file "$W/sess.jsonl" --recover --role user --turns 3)
 grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "recover did not return the last pre-compaction user turn"
 grep -q "AFTER" <<<"$out" && fail "recover leaked a post-compaction turn"
 grep -q "system-reminder" <<<"$out" && fail "noise was not stripped"
+# --raw means verbatim: no per-turn truncation. The default does truncate turn 30, so the check is meaningful.
+out=$(node "$S" --file "$W/sess.jsonl" --role assistant --turns 5)
+grep -q "chars truncated" <<<"$out" || fail "the 700-char assistant default no longer truncates (test transcript too short?)"
+out=$(node "$S" --file "$W/sess.jsonl" --role assistant --turns 5 --raw)
+grep -q "chars truncated" <<<"$out" && fail "--raw truncated an assistant turn"
 out=$(node "$S" --file "$W/sess.jsonl" --max-chars 300)
 grep -q "budget:" <<<"$out" || fail "budget line missing"
 echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user | grep -q . && fail "PreCompact printed to stdout"

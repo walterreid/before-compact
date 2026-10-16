@@ -164,7 +164,7 @@ const isCompactionSummary = (t) =>
   t.includes('This session is being continued from a previous conversation');
 
 function truncate(t, max) {
-  if (!isFinite(max)) return t;          // unlimited
+  if (RAW || !isFinite(max)) return t;   // --raw is verbatim; otherwise 0/omitted = unlimited
   if (max <= 0) return '';               // caller renders a header only
   if (t.length <= max) return t;
   return t.slice(0, max) + `\n  …[+${t.length - max} chars truncated — rerun with --raw or a larger --*-max to see all]`;
