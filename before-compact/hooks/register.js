@@ -27,7 +27,17 @@ let pending = null             // the compaction in flight: PreCompact seen, Ses
 let bundleText = ''            // the last bundle, for the second tab
 let lastError = ''
 let transcript = null          // { path, compactions, events, markers } from --probe, or null
+let transcriptPath = null      // the .jsonl findTranscript picked, even when --probe failed
 let recovering = false         // the "Recover from transcript" button is running
+
+// The one line of a failed process's stderr worth showing: node prints a loader
+// preamble ("node:internal/... throw err; ^") before the "Error: ..." line, so the
+// first N chars are noise. Prefer the Error line, else the last non-empty line.
+function errLine(stderr) {
+  const lines = String(stderr || '').split('\n').map((l) => l.trim()).filter(Boolean)
+  const err = lines.find((l) => /^\w*Error\b/.test(l))
+  return (err || lines[lines.length - 1] || '').slice(0, 200)
+}
 
 // Find this session's transcript the way the script does, but from the mod's
 // side: ~/.claude/projects/<cwd with / and space → ->/<newest>.jsonl
@@ -56,9 +66,10 @@ async function scriptPath($) {
 async function probeTranscript($) {
   try {
     const path = await findTranscript($)
+    transcriptPath = path
     if (!path) { transcript = null; return }
     const r = await $.process.run(['node', await scriptPath($), '--probe', '--file', path])
-    if (r.exitCode !== 0) { lastError = 'probe: ' + (r.stderr || '').trim().slice(0, 120); return }
+    if (r.exitCode !== 0) { transcript = null; lastError = 'probe: ' + errLine(r.stderr); return }
     transcript = JSON.parse(r.stdout)
   } catch (e) { lastError = 'probe: ' + (e && e.message ? e.message : e) }
 }
@@ -74,7 +85,7 @@ async function recoverFromTranscript($) {
     const r = await $.process.run(['node', await scriptPath($), '--recover', '--role', 'user', '--max-chars', '9000', '--file', path])
     const out = (r.stdout || '').trim()
     bundleText = out.length > 9500 ? out.slice(0, 9500) + '\n…[truncated for the pane]' : out
-    if (r.exitCode !== 0 && !out) lastError = 'recover: ' + (r.stderr || '').trim().slice(0, 120)
+    if (r.exitCode !== 0 && !out) lastError = 'recover: ' + errLine(r.stderr)
   } catch (e) { lastError = 'recover: ' + (e && e.message ? e.message : e) }
   finally { recovering = false; $.ui.invalidate('ui.render') }
 }
@@ -318,7 +329,9 @@ export function register(on) {
 
       const history = transcript
         ? Text({ dimColor: true, children: [`Transcript on disk: ${transcript.compactions} compaction marker(s) in ${transcript.events} events${transcript.compactions > compactions.length ? ' (earlier than this plugin was watching; see tab 2)' : ''}`] })
-        : Text({ dimColor: true, children: ['Transcript on disk: not found for this directory'] })
+        : transcriptPath
+          ? Text({ dimColor: true, children: ['Transcript on disk: found, but --probe failed (see last error below)'] })
+          : Text({ dimColor: true, children: ['Transcript on disk: not found for this directory'] })
       body = [
         ...live,
         Text({ bold: true, children: [`Compactions this session: ${compactions.length}`] }),

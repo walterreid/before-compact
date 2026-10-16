@@ -127,3 +127,34 @@ test('a compaction with no status record shows two ✗ marks, not a crash', asyn
   expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a failed --probe shows the useful error line, not node\'s loader preamble', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HOME })
+  const PROJ = `${HOME}/.claude/projects/-work`
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1000, window: 200000, percent: 1 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: SESSION }))
+  on('session.cwd', () => ({ value: '/work' }))
+  // The projects dir exists and holds one transcript; nothing else exists.
+  on('fs.exists', ($, e) => ({ value: e.path === PROJ }))
+  on('fs.list', () => ({ value: [{ name: 'abc.jsonl' }] }))
+  on('fs.stat', () => ({ value: { mtimeMs: 1 } }))
+  // What node prints when the script path no longer exists (the stale-copy case).
+  const STDERR = "node:internal/modules/cjs/loader:1573\n  throw err;\n  ^\n\nError: Cannot find module '/Users/walterreid/.claude/skills/before-compact/scripts/extract_tail.mjs'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1573:15)\n{\n  code: 'MODULE_NOT_FOUND',\n  requireStack: []\n}\n\nNode.js v22.0.0\n"
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: STDERR } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  const err = await ui.find({ type: 'Text', text: /^\(last error:/ })
+  expect(err).toBeDefined()
+  // The line must carry the module path, which is the only part that tells you what went wrong.
+  expect(err!.text).toMatch(/Cannot find module '\/Users\/walterreid\/\.claude\/skills\/before-compact\/scripts\/extract_tail\.mjs'/)
+  expect(err!.text).not.toMatch(/throw err/)
+  // And the transcript line must not claim the transcript is missing when the probe is what failed.
+  expect(await ui.find({ type: 'Text', text: /Transcript on disk: not found/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Transcript on disk: .*probe failed/ })).toBeDefined()
+  await ui.unmount()
+})
