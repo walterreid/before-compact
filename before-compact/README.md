@@ -48,6 +48,57 @@ Mods need Claude Code v2.1.287 or later (the Desktop app bundles its own; `/stat
 the version). The pane works in the terminal and the Desktop app's Code tab, not in the
 VS Code extension. The hooks work everywhere Claude Code runs locally.
 
+## The experiment: `inject_in_mod`
+
+Off by default. Leave it off unless you want to test it.
+
+The two settings hooks re-inject your turns as *text*: the SessionStart hook prints them and
+Claude Code adds the output to the context as hook output. Claude Code's `session.compact`
+event offers another way. Its result is the conversation after compaction, as a list of
+messages, and a hook may hand back a list of its own; a message that still carries the
+engine's `handle` "stands as the engine has it", whole. So the mod can append the last N
+*user messages* of the old transcript, unchanged, after the summary, and skip the text
+copy.
+
+With the flag on (`/config` → *before-compact* → *inject_in_mod*, or `pluginConfigs` in
+`~/.claude/settings.json`), the mod's `session.compact` hook:
+
+1. awaits the compaction as usual (`next(e)`), then picks the last `inject_turns` user
+   messages of `e.messages` that say something (harness noise and tool-result-only turns
+   are skipped, like the script does), newest first under `inject_max_chars`;
+2. writes `~/.claude/before-compact/injected-<session>.json` (when, how many, how long) and
+   **waits for the write**;
+3. returns the result with one built framing message and those messages, handles intact,
+   appended after the summary and the messages the engine kept.
+
+The SessionStart settings hook then **stands down**: the script reads the marker, deletes
+it, prints nothing, and writes a status record saying so (the pane shows `SessionStart –
+stood down` and a `Mod ✓ appended N user turns` line).
+
+**The race this guards against.** The mod and the script share no memory, and both would
+otherwise put the same turns back. The script runs in the SessionStart(compact) settings
+hook, which Claude Code fires after it has installed the compaction, which it can only do
+once the `session.compact` hooks have returned the result. The mod writes the marker before
+it returns, so the marker is on disk before the script can run. Two residual cases are
+handled on the script's side: a marker older than two minutes is ignored and removed (a
+compaction whose SessionStart hook never ran must not silence the next one), and the
+marker is consumed on read (one marker, one stand-down). One case is not: if Claude Code
+rejects the hook's returned list (for example, a message of the wrong shape) the original
+result stands, the marker is already written, and the script stands down for a compaction
+that got nothing appended. The pane's row would then show `Mod ✓` beside the script's
+`stood down` with nothing actually in context. The mod only appends messages the engine
+handed it, so the shape should always be right, but this is the failure to watch for.
+
+**What is verified and what is not.** `claude plugin test` proves the returned list (the
+summary, the kept messages, one framing message, then the last N user messages with their
+handles), the marker, the pane row, and that with the flag off the result is returned
+untouched. `test/run.sh` proves the script stands down on a fresh marker and ignores a
+stale one. **Whether the engine keeps appended handled messages in the next request to the
+model is unverified in the kit: it needs a live `/compact` with the flag on.** The check
+is the one in *Try it* below: after `/compact`, ask Claude what you said right before the
+compaction. If it quotes you, the appended messages reached the model; if it does not, or
+`/context` shows no growth, they were dropped. The pane cannot tell the two apart.
+
 ## Install
 
 Needs Node 18+ on `PATH`. The plugin is the `before-compact/` folder of this repo; the repo
@@ -91,7 +142,7 @@ Or skip compaction: `/before-compact:recover` runs the extractor by hand.
   compaction with a stub mods API (`claude plugin test`, run from this folder). Neither is a
   live session. `claude plugin validate --strict .` reads the mod and lists the events and
   API calls it uses; run it before the first session.
-- The mod's PreCompact and SessionStart hooks run around the same time as the settings
-  hooks, in an order the docs don't promise. The mod re-reads the status file at 1.5 s and
-  6 s after compaction to cover both orders; if a row ever shows `?` for the save or
-  inject, press `r`.
+- The mod reads the script's status record right after its own `classic.PreCompact` and
+  `classic.SessionStart` hooks have passed the event on with `next(e)`, on the reading
+  that the settings hooks run inside that `next`. There are no timers. If that reading
+  is wrong for your build, a row shows `?` for the save or the inject; press `r`.

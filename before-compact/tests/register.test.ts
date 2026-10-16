@@ -178,6 +178,87 @@ test('a precompute, a vetoed compaction and a subagent compaction', async ($, on
   await ui.unmount()
 })
 
+// --- the experiment (userConfig inject_in_mod) ------------------------------------
+// The kit seeds register(on, options) from the manifest's defaults, where the flag is
+// off; a config.set event is how a test turns it on, the same event /config fires.
+// What these prove: the returned messages, the marker, and the pane row. What they
+// cannot prove: that the engine keeps the appended handled messages in the next
+// request. That needs a live /compact.
+
+test('inject_in_mod on: the last user turns go back after the summary, handles intact, and the script is told to stand down', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const { toasts } = stubs($, on, status)
+  on('config.set', ($, e) => ({ value: e.value }))
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', ($, e) => { writes.push({ path: e.path, text: e.text }); return { value: undefined } })
+  const kept = transcript(4)
+  on('session.compact', () => ({ messages: [SUMMARY, ...kept], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  await $.config.set({ key: 'before-compact.inject_in_mod', value: true } as any)
+  await $.config.set({ key: 'before-compact.inject_turns', value: 3 } as any)
+
+  // Ten turns (even = user), then a user turn that is only harness noise and one
+  // that is only a tool result: neither is a voice sample, so neither goes back.
+  const old = [
+    ...transcript(10),
+    { role: 'user', text: '<system-reminder>noise</system-reminder>', toolUses: [], handle: 'h-noise' },
+    { role: 'user', text: '', toolUses: [], handle: 'h-tool' },
+  ] as const
+  const result: any = await $.session.compact({ trigger: 'manual', messages: old } as any)
+
+  // The engine's own part of the result is untouched; the appended part follows it.
+  expect(result.tokensBefore).toBe(82000)
+  expect(result.tokensAfter).toBe(19000)
+  expect(result.messages.slice(0, 5)).toEqual([SUMMARY, ...kept])
+  expect(result.messages[5].role).toBe('user')
+  expect(result.messages[5].handle).toBeUndefined()
+  expect(result.messages[5].text).toMatch(/^\[before-compact\] The 3 messages after this one are verbatim user turns from just before this context was compacted/)
+  // The last three user turns that say something, oldest first, as the engine handed them (handles h4, h6, h8).
+  expect(result.messages.slice(6)).toEqual([old[4], old[6], old[8]])
+  expect(result.messages.length).toBe(9)
+
+  // The stand-down marker went to the status directory before the hook returned.
+  expect(writes.length).toBe(1)
+  expect(writes[0].path).toBe(`${HOME}/.claude/before-compact/injected-${SESSION}.json`)
+  const marker = JSON.parse(writes[0].text)
+  expect(marker).toEqual({ at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), trigger: 'manual', appended: 3, chars: 18 })
+
+  // The pane row counts the appended turns in the after-number and shows the Mod line.
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}12 → 9 messages/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}Mod {10}✓ appended 3 user turns \(~18 chars\) after the summary$/ })).toBeDefined()
+  await ui.unmount()
+
+  // The script read the marker, printed nothing, and said so in its record.
+  status.log = [{ at: '2026-10-16T15:00:05.000Z', event: 'SessionStart', source: 'compact', injected: false,
+    origin: 'stood down: the mod appended 3 user turns after the summary', mod_appended: 3, mod_chars: 18, bundle: BUNDLE, transcript: '/x.jsonl' }]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+  expect(toasts).toEqual(['Compaction done — the mod appended 3 of your turns after the summary'])
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /SessionStart – stood down \(stood down: the mod appended 3 user turns after the summary\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}Mod {10}✓ appended 3 user turns \(~18 chars\) after the summary$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /marker was missed/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('inject_in_mod off (the default): the result is untouched and no marker is written', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  on('fs.write', () => ({ deny: 'nothing may be written while the flag is off' }))
+  const answer = { messages: [SUMMARY, ...transcript(4)], tokensBefore: 82000, tokensAfter: 19000 }
+  on('session.compact', () => answer)
+
+  const result = await $.session.compact({ trigger: 'manual', messages: transcript(10) } as any)
+  expect(result).toEqual(answer)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}10 → 5 messages/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Mod {10}/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a failed --probe shows the useful error line, not node\'s loader preamble', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HOME })

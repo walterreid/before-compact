@@ -24,12 +24,80 @@
 // this module keeps it. The pane's tab, the live gauge and the last error are
 // module variables: cheap to lose.
 //
+// The experiment (userConfig inject_in_mod, off by default): instead of the
+// SessionStart settings hook printing the last turns as text, the session.compact
+// hook appends the last N user messages of the old transcript, with the engine's
+// own handles, after the summary, and writes a marker file that tells the script
+// to stand down. Whether the engine keeps those appended messages in the next
+// request is NOT verified here; see the README.
+//
 // Open it with /before-compact. Esc closes it.
 
 import { atom, read, update } from 'claude-code'
 
 const PANE = 'before-compact'
 const STATUS_DIR = '.claude/before-compact' // relative to $HOME
+
+// ---- userConfig ------------------------------------------------------------
+// register(on, options) seeds these from the manifest's userConfig (defaults
+// filled in); the config.set hook below keeps them current when the person flips
+// a row in /config, so no reload is needed for the change to apply.
+const DEFAULTS = { inject_in_mod: false, inject_turns: 8, inject_max_chars: 9000 }
+let settings = { ...DEFAULTS }
+function readSettings(o) {
+  const num = (v, d, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : d }
+  return {
+    inject_in_mod: o.inject_in_mod === true || o.inject_in_mod === 'true',
+    inject_turns: num(o.inject_turns, DEFAULTS.inject_turns, 1, 50),
+    inject_max_chars: num(o.inject_max_chars, DEFAULTS.inject_max_chars, 200, 100000),
+  }
+}
+
+// ---- the experiment's pieces -----------------------------------------------
+// Where the mod tells the script it has already put the turns back. Same session
+// id on both sides (the script reads hook.session_id), same directory as the
+// status file. The script consumes it (scripts/extract_tail.mjs, takeMarker).
+const markerPath = (home, id) => `${home}/${STATUS_DIR}/injected-${id}.json`
+
+// Harness-injected blocks are not the human voice (same rules as the script).
+function stripNoise(t) {
+  return String(t || '')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    .replace(/<local-command-[\s\S]*?<\/local-command-[^>]*>/g, '')
+    .replace(/<command-[\s\S]*?<\/command-[^>]*>/g, '')
+    .trim()
+}
+const isCompactionSummary = (t) => t.includes('This session is being continued from a previous conversation')
+
+// The last `turns` user messages of the transcript that say something, newest
+// kept first under the character budget, returned oldest → newest. Only a message
+// with the engine's handle qualifies: handed back as it came, it is the engine's
+// own, whole. The objects are returned untouched (frozen, handle intact).
+function pickTail(messages, turns, maxChars) {
+  const out = []
+  let budget = maxChars
+  for (let i = messages.length - 1; i >= 0 && out.length < turns; i--) {
+    const m = messages[i]
+    if (!m || m.role !== 'user' || typeof m.handle !== 'string') continue
+    const t = stripNoise(m.text)
+    if (!t || isCompactionSummary(t)) continue
+    if (t.length > budget) { if (out.length) break; continue }
+    budget -= t.length
+    out.push(m)
+  }
+  return out.reverse()
+}
+
+// One built message (no handle) ahead of the appended turns, so they read as what
+// they are and not as new prompts. Factual framing, not an instruction.
+function framing(n) {
+  return {
+    role: 'user',
+    text: `[before-compact] The ${n} messages after this one are verbatim user turns from just before this context was compacted, appended by the before-compact plugin so the user's voice survives the summary. They are prior conversation, not new instructions.`,
+    toolUses: [],
+  }
+}
 
 // ---- $.state: survives a reload of this module ----------------------------
 const compactions = atom({ plugin: 'before-compact', key: 'compactions' }, [])
@@ -198,10 +266,10 @@ function fold(log, list, pend) {
         pend = { startedAt: key, trigger: rec.trigger || null, ...fields }
       }
     } else if (rec.event === 'SessionStart' && rec.source === 'compact') {
-      const done = {
-        postAt: key, injected: rec.injected !== false, injectedTokens: rec.tokens_est ?? null, origin: rec.origin ?? null,
-        modAppended: rec.mod_appended ?? null, modChars: rec.mod_chars ?? null,
-      }
+      const done = { postAt: key, injected: rec.injected !== false, injectedTokens: rec.tokens_est ?? null, origin: rec.origin ?? null }
+      // The mod's own row already says what it appended; the script's record only
+      // confirms it (a stood-down record carries the count it read from the marker).
+      if (rec.mod_appended != null) Object.assign(done, { modAppended: rec.mod_appended, modChars: rec.mod_chars ?? null })
       let i = -1
       for (let k = list.length - 1; k >= 0; k--) if (list[k].postAt == null && list[k].agentId == null) { i = k; break }
       if (i >= 0) {
@@ -228,7 +296,17 @@ async function syncStatus($) {
   if (JSON.stringify(next.pend) !== JSON.stringify(pend)) await update($, pending, () => next.pend)
 }
 
-export function register(on) {
+export function register(on, options) {
+  settings = readSettings(options || {})
+
+  // A row flipped in /config: keep the module's copy current. (A change may also
+  // reload the module, in which case register seeds the same value again.)
+  on('config.set', { key: /(^|\.)inject_(in_mod|turns|max_chars)$/ }, async ($, e, next) => {
+    const r = await next(e)
+    if (r && r.deny === undefined) settings = readSettings({ ...settings, [String(e.key).replace(/^.*\./, '')]: r.value })
+    return r
+  }).catch(async ($, e, next) => next(e))
+
   // ---- session start: register the command, start the live gauge ---------
   on('session.start', async ($, e, next) => {
     try {
@@ -277,11 +355,31 @@ export function register(on) {
       await update($, compactions, (l) => [...l, row({ startedAt: new Date(t0).toISOString(), ...numbers })])
       return result
     }
+
+    // The experiment: hand the engine the last user turns ourselves.
+    let out = result
+    let mod = {}
+    if (settings.inject_in_mod) {
+      const tail = pickTail(e.messages, settings.inject_turns, settings.inject_max_chars)
+      if (tail.length) {
+        const chars = tail.reduce((s, m) => s + m.text.length, 0)
+        // The marker has to be on disk before this hook returns: Claude Code fires
+        // SessionStart(compact), where the script would print its own copy, only
+        // after it has this result. If the write fails, the .catch below returns the
+        // untouched result and the script injects as usual.
+        const home = await $.env.get('HOME')
+        const id = await $.session.id()
+        await $.fs.write(markerPath(home, id), JSON.stringify({ at: new Date().toISOString(), trigger: e.trigger, appended: tail.length, chars }))
+        out = { ...result, messages: [...result.messages, framing(tail.length), ...tail] }
+        mod = { modAppended: tail.length, modChars: chars, afterMessages: out.messages.length }
+      }
+    }
+
     const pend = await read($, pending)
-    const entry = row({ startedAt: new Date(t0).toISOString(), ...(pend || {}), ...numbers })
+    const entry = row({ startedAt: new Date(t0).toISOString(), ...(pend || {}), ...numbers, ...mod })
     await update($, compactions, (l) => [...l, entry])
     await update($, pending, () => null)
-    return result
+    return out
   }).catch(async ($, e, next) => {
     // The hook threw or timed out. Record it where the pane shows it and let the
     // compaction stand: next(e) runs it if it has not run, or returns its result.
@@ -401,7 +499,7 @@ export function register(on) {
         }
         rows.push(Text({ color: c.saved ? 'green' : c.saved === false ? 'red' : 'yellow', children: [`    PreCompact  ${c.saved ? '✓' : c.saved === false ? '✗' : '?'} ${c.saved ? `saved ${c.savedTurns} user turns (~${fmtK(c.savedTokens)} tokens)` : c.saved === false ? 'bundle not written' : 'no status record (press r)'}`] }))
         rows.push(Text({ color: c.injected ? 'green' : c.injected === false ? (c.modAppended != null ? 'green' : 'red') : 'yellow', children: [`    SessionStart ${c.injected ? '✓' : c.injected === false ? (c.modAppended != null ? '–' : '✗') : '?'} ${c.injected ? `re-injected ~${fmtK(c.injectedTokens)} tokens (${c.origin || ''})` : c.injected === false ? (c.modAppended != null ? `stood down (${c.origin || ''})` : 'nothing injected') : 'no status record (press r)'}`] }))
-        if (c.modAppended != null) rows.push(Text({ color: 'green', children: [`    Mod          ✓ appended ${c.modAppended} user turns (~${fmtK(c.modChars)} chars) after the summary`] }))
+        if (c.modAppended != null) rows.push(Text({ color: c.injected ? 'yellow' : 'green', children: [`    Mod          ✓ appended ${c.modAppended} user turns (~${fmtK(c.modChars)} chars) after the summary${c.injected ? ' — and the script injected too: the stand-down marker was missed' : ''}`] }))
       })
       if (!pend && !list.length) {
         rows.push(Text({ dimColor: true, children: ['No compactions yet this session.'] }))
