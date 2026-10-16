@@ -162,6 +162,8 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   characters, written before each compaction and read back after it.
 - `~/.claude/before-compact/status-<session id>.json`: one small record per hook run
   (times, counts, paths), at most 50 entries. The mod reads it; nothing else does.
+- `~/.claude/before-compact/injected-<session id>.json`, only with the `inject_in_mod`
+  experiment on: a one-line marker the mod writes and the script deletes on read.
 - Nothing else: no settings, no instructions files, nothing under the project.
 
 **What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
