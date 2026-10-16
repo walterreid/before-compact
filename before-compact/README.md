@@ -76,6 +76,50 @@ it should quote you.
 
 Or skip compaction: `/before-compact:recover` runs the extractor by hand.
 
+## What it runs and changes
+
+**It sends nothing anywhere.** Neither the hooks nor the mod makes a network request.
+
+**What it runs:** `node` on its own `scripts/extract_tail.mjs`, twice per compaction from
+the settings hooks, and from the mod with `--probe` (at session start, on Refresh, and
+after a compaction) and with `--recover` (the button on tab 2). Nothing else.
+
+**What it reads:**
+
+- The transcript Claude Code names in the hook input, and from the mod the newest
+  `.jsonl` under `~/.claude/projects/<this directory>/`, to pull your last turns.
+- Its own files under `~/.claude/before-compact/` and `$CLAUDE_PLUGIN_DATA`.
+- The environment variable `HOME`, to find those. No credentials, no other variables.
+- From Claude Code: the context usage, the message count, the session id, and the cwd.
+
+**What it writes:**
+
+- `$CLAUDE_PLUGIN_DATA/precompact-<session id>.txt`: your last user turns, at most 9,000
+  characters, written before each compaction and read back after it.
+- `~/.claude/before-compact/status-<session id>.json`: one small record per hook run
+  (times, counts, paths), at most 50 entries. The mod reads it; nothing else does.
+- Nothing else: no settings, no instructions files, nothing under the project.
+
+**What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
+bundle above with a one-sentence factual framing. That is the whole point of the plugin
+and the only way it touches the conversation. The mod never writes to context.
+
+**How it hooks into Claude Code** (from `claude plugin validate --strict`, with its `via` notes dropped):
+
+    ./register.js hooks: session.start, command.run{command=before-compact},
+      classic.PreCompact, classic.SessionStart{source=compact},
+      ui.render{component=Pane, requestId=before-compact}
+    ./register.js calls: $.clock.after, $.clock.every, $.command.register, $.env.get,
+      $.fs.exists, $.fs.list, $.fs.read, $.fs.stat, $.process.run, $.session.cwd,
+      $.session.id, $.session.messages, $.session.usage, $.ui.invalidate, $.ui.log,
+      $.ui.open, $.ui.resolve, $.ui.toast
+    ./register.js env reads: HOME
+
+It never approves, blocks, or alters a tool call, a prompt, or a compaction.
+
+**To remove what it leaves behind,** delete `~/.claude/before-compact/` and the plugin's
+data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from a path).
+
 ## Known limits
 
 - The SessionStart output is capped by Claude Code at 10,000 characters; over that it is
