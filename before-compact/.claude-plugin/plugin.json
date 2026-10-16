@@ -2,7 +2,31 @@
   "name": "before-compact",
   "description": "Keeps your voice across compaction. A PreCompact hook saves the last turns verbatim; a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane.",
   "version": "0.1.0",
-  "author": { "name": "Walter Reid", "email": "walterreid@gmail.com" },
+  "author": {
+    "name": "Walter Reid",
+    "email": "walterreid@gmail.com"
+  },
   "repository": "https://github.com/walterreid/before-compact",
-  "license": "MIT"
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "inject_in_mod": {
+      "type": "boolean",
+      "title": "Experiment: re-inject from the mod instead of the SessionStart hook",
+      "description": "Off (default): the SessionStart settings hook prints your last turns as text. On: the mod's session.compact hook appends your last user messages, as the engine's own messages, after the summary, and tells the script to stand down. Whether the engine keeps them in the next request is unverified; see the README.",
+      "default": false
+    },
+    "inject_turns": {
+      "type": "number",
+      "title": "Experiment: how many user turns the mod appends",
+      "description": "Used only when inject_in_mod is on. 1 to 50.",
+      "default": 8
+    },
+    "inject_max_chars": {
+      "type": "number",
+      "title": "Experiment: character budget for the appended turns",
+      "description": "Used only when inject_in_mod is on. Newest turns are kept first; older ones are dropped once the budget is spent.",
+      "default": 9000
+    }
+  }
 }

@@ -32,4 +32,16 @@ out=$(echo '{"session_id":"other","transcript_path":"'"$W/sess.jsonl"'","hook_ev
 grep -q "extracted from the transcript" <<<"$out" || fail "live fallback not taken"
 [ "$(wc -c <<<"$out")" -lt 10000 ] || fail "hook output over the 10000-char cap"
 [ -s "$HOME/.claude/before-compact/status-t.json" ] || fail "status record not written under the test HOME"
+# inject_in_mod: a fresh stand-down marker from the mod makes SessionStart print nothing and record why.
+M="$HOME/.claude/before-compact/injected-t.json"
+printf '{"at":"%s","trigger":"manual","appended":5,"chars":1200}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$M"
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+[ -z "$out" ] || fail "SessionStart injected although the mod's marker said it had appended the turns"
+[ -e "$M" ] && fail "the stand-down marker was not consumed"
+grep -q '"mod_appended": 5' "$HOME/.claude/before-compact/status-t.json" || fail "the stand-down was not recorded in the status file"
+# A stale marker (older than 2 minutes) is ignored and removed: the script injects as usual.
+printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":1200}' > "$M"
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+grep -q "prepared by the PreCompact hook" <<<"$out" || fail "a stale marker suppressed the injection"
+[ -e "$M" ] && fail "the stale marker was not removed"
 echo "all checks passed"

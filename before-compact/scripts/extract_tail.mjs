@@ -37,7 +37,7 @@
 // latest, and ends with a stats line (turn counts + estimated token cost +
 // resolved source path).
 
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -97,6 +97,26 @@ function recordStatus(sessionId, entry) {
     log.push({ at: new Date().toISOString(), ...entry });
     writeFileSync(p, JSON.stringify(log.slice(-50), null, 1));
   } catch { /* status is best-effort; never fail the hook over it */ }
+}
+
+// The stand-down marker the mod writes (hooks/register.js, userConfig inject_in_mod)
+// when it has itself appended the last user turns after the summary. It is written
+// inside the mod's session.compact hook, before that hook returns, and Claude Code
+// fires SessionStart(compact) only after the compaction result is in hand; so when
+// this script runs for that compaction the marker is already on disk. Consumed on
+// read, and ignored when older than MARKER_MAX_AGE_MS, so a marker left behind by a
+// compaction whose SessionStart hook never ran cannot silence the next one.
+const MARKER_MAX_AGE_MS = 2 * 60 * 1000;
+function markerPath(sessionId) {
+  return join(homedir(), '.claude', 'before-compact', `injected-${sessionId || 'unknown'}.json`);
+}
+function takeMarker(sessionId) {
+  const p = markerPath(sessionId);
+  let m = null;
+  try { if (!existsSync(p)) return null; m = JSON.parse(readFileSync(p, 'utf8')); } catch { m = null; }
+  try { unlinkSync(p); } catch { /* best effort */ }
+  if (!m || typeof m.at !== 'string' || !(Date.now() - Date.parse(m.at) <= MARKER_MAX_AGE_MS)) return null;
+  return m;
 }
 
 // ---- locate the transcript -------------------------------------------------
@@ -256,6 +276,17 @@ if (HOOK) {
     // as context. Prefer the PreCompact bundle if one is fresh for this session.
     let text = null, origin = '';
     const p = bundlePath(hook.session_id);
+    // The mod already appended the turns itself (inject_in_mod): print nothing, so
+    // they are not in the context twice, and say so in the status record.
+    const stood = takeMarker(hook.session_id);
+    if (stood) {
+      recordStatus(hook.session_id, {
+        event: 'SessionStart', source: hook.source || null, injected: false,
+        origin: `stood down: the mod appended ${stood.appended} user turns after the summary`,
+        mod_appended: stood.appended ?? null, mod_chars: stood.chars ?? null, bundle: p, transcript: T,
+      });
+      process.exit(0);
+    }
     try {
       if (existsSync(p) && Date.now() - statSync(p).mtimeMs < BUNDLE_MAX_AGE_MS) {
         text = readFileSync(p, 'utf8'); origin = 'prepared by the PreCompact hook';
@@ -270,7 +301,7 @@ if (HOOK) {
     // Factual framing, not an instruction: text that reads as an out-of-band command
     // can trip prompt-injection defenses and get surfaced instead of used.
     recordStatus(hook.session_id, {
-      event: 'SessionStart', source: hook.source || null, origin,
+      event: 'SessionStart', source: hook.source || null, origin, injected: true,
       chars: text.length, tokens_est: Math.round(text.length / 4), bundle: p, transcript: T,
     });
     console.log(
