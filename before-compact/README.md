@@ -140,52 +140,6 @@ it should quote you.
 
 Or skip compaction: `/before-compact:recover` runs the extractor by hand.
 
-## What it runs and changes
-
-From `claude plugin validate --strict ./before-compact` on Claude Code 2.1.299, the lines
-that say what the mod touches:
-
-    ./register.js calls: $.clock.every, $.command.register, $.env.get, $.fs.exists (via findTranscript, loadBundle, readStatus), $.fs.list (via findTranscript), $.fs.read (via loadBundle, readStatus), $.fs.stat (via findTranscript), $.fs.write, $.process.run (via probeTranscript, recoverFromTranscript), $.session.cwd (via findTranscript), $.session.id, $.session.messages (via refreshLive), $.session.usage (via refreshLive), $.state.get, $.state.set, $.ui.invalidate, $.ui.log, $.ui.open, $.ui.resolve, $.ui.toast
-    ./register.js env writes: nothing
-    ./register.js env reads: HOME
-    ./register.js state writes: before-compact.compactions, before-compact.pending
-    ./register.js state reads: before-compact.compactions, before-compact.pending
-
-**Environment it reads.** The mod reads `HOME`, to find `~/.claude/before-compact/` and
-`~/.claude/projects/`. The script reads `HOME` the same way (`os.homedir()`) and
-`CLAUDE_PLUGIN_DATA`, where the bundle goes (the OS temp dir when it is unset).
-`${CLAUDE_PLUGIN_ROOT}` in `hooks.json` is expanded by Claude Code, not read by the script.
-Nothing writes to the environment.
-
-**Files it writes.**
-
-| Path | Written by | When |
-| --- | --- | --- |
-| `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` | the script, PreCompact hook | every auto or manual compaction |
-| `~/.claude/before-compact/status-<session>.json` | the script, both hooks | every compaction; the newest 50 records are kept |
-| `~/.claude/before-compact/injected-<session>.json` | the mod, `$.fs.write`, only with `inject_in_mod` on | inside the `session.compact` hook, before it returns; the script deletes it |
-
-Nothing else: the mod uses `$.state` (in memory, this session) and not `$.store`, makes
-no `$.http` call, and writes no settings. The marker and status files are small JSON.
-
-**The node subprocess.** The mod runs `node <plugin>/scripts/extract_tail.mjs` through
-`$.process.run` in two cases, both read-only: `--probe --file <transcript>` at session
-start and on **Refresh** (reads the transcript, prints one JSON line), and `--recover --role
-user --max-chars 9000 --file <transcript>` when you press `g` on tab 2. Neither runs when
-no transcript is found for the working directory. The settings hooks in `hooks.json` run
-the same script with `--hook` on PreCompact and SessionStart(compact), 20 s timeout each.
-
-**What goes into Claude's context.** With `inject_in_mod` off (the default): the
-SessionStart(compact) hook's stdout, at most 9000 characters of your last user turns after
-a one-sentence factual preamble, which Claude Code adds as hook output. With it on: the
-message list the mod returns from `session.compact` (one framing message and the last N
-user messages of the old transcript), if the engine keeps it; the script then prints
-nothing. Nothing is injected on a precompute, a vetoed compaction or a subagent's
-compaction. The toasts and `$.ui.log` lines are for you, not for Claude.
-
-Tested with Claude Code 2.1.299 (the Desktop app's bundle). The hooks module needs 2.1.287
-or later; the `session.compact` event is in the public types stamped 2.1.277.
-
 ## Known limits
 
 - The SessionStart output is capped by Claude Code at 10,000 characters; over that it is

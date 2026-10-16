@@ -432,7 +432,8 @@ export function register(on, options) {
   })
 
   // ---- draw the pane -------------------------------------------------------
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const redraw = () => $.ui.invalidate('ui.render')
     const width = Math.max(30, (e.props && e.props.bodyColumns) || 60)
