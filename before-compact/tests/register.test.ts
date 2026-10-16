@@ -1,11 +1,18 @@
-// Drives hooks/register.js through one simulated compaction with a stub mods API.
+// Drives hooks/register.js through simulated compactions with a stub mods API.
 // Run from the plugin directory: claude plugin test   (needs Claude Code 2.1.287+)
 //
-// What it proves: the PreCompact hook snapshots the context, the SessionStart(compact)
-// hook picks up the status records the script wrote, the first settle completes the log
-// entry with the after-numbers, the second settle does not duplicate it, and the pane
-// draws the row with two ✓ marks. What it cannot prove: that a live session fires these
-// events, or the .catch handlers (nothing in the mod can be made to throw from a stub).
+// What it proves: the session.compact hook records the engine's own token and
+// message counts, the trigger, the instructions and the duration; the classic
+// PreCompact and SessionStart hooks pick up the script's status records after their
+// next(e); the pane draws the row with two ✓ marks; a precompute and a vetoed
+// compaction leave no row; a subagent's compaction gets its own row; and the hook
+// returns the result untouched (phase 1 observes only).
+//
+// What it cannot prove: the order a live engine fires classic.PreCompact in relative
+// to session.compact's next(e) (the tests fire PreCompact first; the fold handles
+// either order), that a live SessionStart(compact) settings hook finishes inside the
+// mod hook's next(e), or that $.state survives a real reload (the kit holds state for
+// one test only).
 import { expect, mock, test } from 'claude-code/testing'
 
 const HOME = '/home/t'
@@ -14,12 +21,10 @@ const STATUS = `${HOME}/.claude/before-compact/status-${SESSION}.json`
 const BUNDLE = '/data/precompact-sess1.txt'
 
 // The two records scripts/extract_tail.mjs writes (see recordStatus there).
-const STATUS_LOG = [
-  { at: '2026-10-16T14:58:00.000Z', event: 'PreCompact', trigger: 'manual', written: true, bundle: BUNDLE,
-    turns: 32, chars: 4000, tokens_est: 1000, transcript: '/x.jsonl' },
-  { at: '2026-10-16T14:58:05.000Z', event: 'SessionStart', source: 'compact', origin: 'prepared by the PreCompact hook',
-    chars: 4100, tokens_est: 1025, bundle: BUNDLE, transcript: '/x.jsonl' },
-]
+const PRE = { at: '2026-10-16T14:58:00.000Z', event: 'PreCompact', trigger: 'manual', written: true, bundle: BUNDLE,
+  turns: 32, chars: 4000, tokens_est: 1000, transcript: '/x.jsonl' }
+const POST = { at: '2026-10-16T14:58:05.000Z', event: 'SessionStart', source: 'compact', origin: 'prepared by the PreCompact hook',
+  chars: 4100, tokens_est: 1025, bundle: BUNDLE, transcript: '/x.jsonl', injected: true }
 
 // What Claude Code passes to the ui.render hook for this pane.
 const PANE = {
@@ -30,60 +35,75 @@ const PANE = {
   props: { title: 'Before Compact', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
 
-test('one compaction: snapshot before, status after, one completed row in the pane', async ($, on) => {
-  const clock = mock.clock(on)
-  mock.env(on, { HOME })
+// A transcript of n messages in $.session.messages()'s shape, each with the
+// engine's handle, as session.compact's e.messages carries them.
+const transcript = (n: number) =>
+  Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `turn ${i}`, toolUses: [], handle: `h${i}` } as const))
 
-  // Live numbers the mod reads; the test changes them between the two events.
-  let live = { tokens: 82000, window: 200000, percent: 41 }
-  let messages = 143
-  on('session.usage', () => ({ value: { startedAt: 0, context: live, rateLimits: [], cost: 0 } }))
-  on('session.messages', () => ({ value: Array.from({ length: messages }, () => ({ role: 'user', text: 'x', toolUses: [] })) }))
+const SUMMARY = { role: 'user', text: 'This session is being continued from a previous conversation. Summary.', toolUses: [] } as const
+
+// The stubs every test needs; `status` is what the status file holds right now.
+function stubs($: any, on: any, status: { log: unknown[] }) {
+  mock.clock(on)
+  mock.env(on, { HOME })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 82000, window: 200000, percent: 41 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
   on('session.id', () => ({ value: SESSION }))
   on('session.cwd', () => ({ value: '/work' }))
-
-  // Filesystem: the status file and the bundle exist; nothing else does, so
-  // findTranscript returns null and --probe is never run.
-  on('fs.exists', ($, e) => ({ value: e.path === STATUS || e.path === BUNDLE }))
-  on('fs.read', ($, e) => ({ value: e.path === STATUS ? JSON.stringify(STATUS_LOG) : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : '' }))
+  // Filesystem: the status file (when it has records) and the bundle exist; nothing
+  // else does, so findTranscript returns null and --probe is never run.
+  on('fs.exists', ($: any, e: any) => ({ value: (e.path === STATUS && status.log.length > 0) || e.path === BUNDLE }))
+  on('fs.read', ($: any, e: any) => ({ value: e.path === STATUS ? JSON.stringify(status.log) : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : '' }))
   on('process.run', () => ({ deny: 'process.run must not be called when no transcript was found' }))
-
   const toasts: string[] = []
   const logs: string[] = []
-  on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
-  on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
-
+  on('ui.toast', ($: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('ui.log', ($: any, e: any) => { logs.push(e.text); return { value: undefined } })
   // Answer the classic events after the mod passes them on with next(e).
   on('classic.PreCompact', () => ({}))
   on('classic.SessionStart', () => ({}))
+  return { toasts, logs }
+}
 
-  // --- before: Claude Code is about to compact ---
+test('one compaction: PreCompact opens it, session.compact fills the numbers, SessionStart closes it', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const { toasts, logs } = stubs($, on, status)
+  // The engine's answer to session.compact: the summary plus six kept messages, and its own counts.
+  on('session.compact', () => ({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  // --- before: the PreCompact settings hook runs inside next(e) and writes its record ---
+  status.log = [PRE]
   await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
   expect(toasts).toEqual(['Compaction starting — saving your last turns'])
 
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /compacting now \(manual\) — before: 82k tokens, 143 messages/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^● compacting now \(manual\) — started \d\d:\d\d$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PreCompact save: ✓ 32 turns, ~1k tokens/ })).toBeDefined()
   await ui.unmount()
 
-  // --- after: the window was rewritten, the script has written both records ---
-  live = { tokens: 19000, window: 200000, percent: 10 }
-  messages = 7
-  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
-
-  // Nothing is read until the first settle at 1.5 s.
-  await clock.advance(1000)
-  expect(toasts.length).toBe(1)
-
-  await clock.advance(500)
-  expect(toasts).toEqual(['Compaction starting — saving your last turns', 'Restored 1k tokens of your voice'])
-  expect(logs).toEqual(['compaction: 82k → 19k tokens, 143 → 7 messages; bundle re-injected'])
+  // --- the compaction: the mod observes the result and leaves it untouched ---
+  const result = await $.session.compact({ trigger: 'manual', instructions: 'keep the plan', messages: transcript(143) } as any)
+  expect(result).toEqual({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 })
 
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}143 → 7 messages$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}143 → 7 messages {3}\d+\.\d s$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /PreCompact {2}✓ saved 32 user turns \(~1k tokens\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /SessionStart ✓ re-injected ~1k tokens \(prepared by the PreCompact hook\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart \? no status record \(press r\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
+  await ui.unmount()
+
+  // --- after: the SessionStart settings hook prints the bundle and writes its record inside next(e) ---
+  status.log = [PRE, POST]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+  expect(toasts).toEqual(['Compaction starting — saving your last turns', 'Restored 1k tokens of your voice'])
+  expect(logs).toEqual([expect.stringMatching(/^compaction: 82k → 19k tokens, 143 → 7 messages in \d+\.\d s; bundle re-injected$/)])
+
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart ✓ re-injected ~1k tokens \(prepared by the PreCompact hook\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#2 / })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
 
   // The bundle tab shows what was put back.
@@ -93,38 +113,68 @@ test('one compaction: snapshot before, status after, one completed row in the pa
   await ui.press({ key: 'tab-monitor' })
   await ui.unmount()
 
-  // --- the second settle at 6 s must not add a second row or a second toast ---
-  await clock.advance(4500)
+  // --- a second SessionStart with the same records (a resume, a refresh) adds nothing ---
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
   expect(toasts.length).toBe(2)
   expect(logs.length).toBe(1)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^#2 / })).toBeUndefined()
   await ui.unmount()
 })
 
-test('a compaction with no status record shows two ✗ marks, not a crash', async ($, on) => {
-  const clock = mock.clock(on)
-  mock.env(on, { HOME })
-  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 50000, window: 200000, percent: 25 }, rateLimits: [], cost: 0 } }))
-  on('session.messages', () => ({ value: [] }))
-  on('session.id', () => ({ value: SESSION }))
-  on('session.cwd', () => ({ value: '/work' }))
-  on('fs.exists', () => ({ value: false }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
-  on('classic.PreCompact', () => ({}))
-  on('classic.SessionStart', () => ({}))
+test('a compaction with no status record shows the numbers and two ? marks, not a crash', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const { toasts } = stubs($, on, status)
+  on('session.compact', () => ({ messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 }))
 
   await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'auto' })
-  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
-  await clock.advance(6000)
-
-  // No record ever arrived, so the entry stays pending: the pane says so and shows no error.
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /compacting now \(auto\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /PreCompact save: waiting for the hook…/ })).toBeDefined()
+  await ui.unmount()
+
+  await $.session.compact({ trigger: 'auto', messages: transcript(20) } as any)
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+
+  // No record ever arrived: the row has the engine's numbers and says so for both hooks, with no error.
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}auto {3}50k → 4k tokens {3}20 → 1 messages/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PreCompact {2}\? no status record \(press r\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart \? no status record \(press r\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  expect(toasts).toEqual(['Compaction starting — saving your last turns'])
+  await ui.unmount()
+})
+
+test('a precompute, a vetoed compaction and a subagent compaction', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  let answer: any = { messages: [SUMMARY], tokensBefore: 10, tokensAfter: 5 }
+  on('session.compact', () => answer)
+
+  // A precompute parks its result and installs nothing: no row.
+  await $.session.compact({ trigger: 'precompute', messages: transcript(4) } as any)
+  // A vetoed compaction leaves the conversation as it is: no row, and the pending entry is dropped.
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  answer = { skip: 'a hook said no' }
+  const vetoed = await $.session.compact({ trigger: 'manual', messages: transcript(4) } as any)
+  expect(vetoed).toEqual({ skip: 'a hook said no' })
+
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 0$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
+  await ui.unmount()
+
+  // A subagent's own compaction gets a row of its own, tagged with the agent.
+  answer = { messages: [SUMMARY], tokensBefore: 30000, tokensAfter: 2000 }
+  await $.session.compact({ trigger: 'auto', agentId: 'agent-7', messages: transcript(9) } as any)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}agent agent-7 {2}auto {3}30k → 2k tokens {3}9 → 1 messages/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /a subagent's own compaction/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PreCompact {2}/ })).toBeUndefined()
   await ui.unmount()
 })
 
