@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use or build on before-compact, a mention of the author is appreciated. You can cite it as below."
+type: software
+title: "before-compact: keep your voice across a Claude Code compaction"
+authors:
+  - family-names: Reid
+    given-names: Walter
+    email: walterreid@gmail.com
+repository-code: "https://github.com/walterreid/before-compact"
+license: MIT
+date-released: 2026-10-16
+version: 0.1.0
+keywords:
+  - claude-code
+  - plugin
+  - compaction
+  - context-window
