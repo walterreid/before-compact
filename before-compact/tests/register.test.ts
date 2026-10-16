@@ -2,7 +2,8 @@
 // Run from the plugin directory: claude plugin test   (needs Claude Code 2.1.287+)
 //
 // What it proves: the session.compact hook records the engine's own token and
-// message counts, the trigger, the instructions and the duration; the classic
+// message counts, the trigger, the instructions, the duration and the summary the
+// engine installed (the result's first message, shown on the Summary tab); the classic
 // PreCompact and SessionStart hooks pick up the script's status records after their
 // next(e); the pane draws the row with two ✓ marks; a precompute and a vetoed
 // compaction leave no row; a subagent's compaction gets its own row; and the hook
@@ -23,8 +24,9 @@ const STATUS = `${HOME}/.claude/before-compact/status-${SESSION}.json`
 const BUNDLE = '/data/precompact-sess1.txt'
 
 // The two records scripts/extract_tail.mjs writes (see recordStatus there).
+const ARC = '/data/arc-sess1.txt'
 const PRE = { at: '2026-10-16T14:58:00.000Z', event: 'PreCompact', trigger: 'manual', written: true, bundle: BUNDLE,
-  turns: 32, chars: 4000, tokens_est: 1000, transcript: '/x.jsonl' }
+  turns: 32, chars: 4000, tokens_est: 1000, arc: ARC, arc_written: true, arc_turns: 62, arc_chars: 44000, arc_tokens_est: 11000, transcript: '/x.jsonl' }
 const POST = { at: '2026-10-16T14:58:05.000Z', event: 'SessionStart', source: 'compact', origin: 'prepared by the PreCompact hook',
   chars: 4100, tokens_est: 1025, bundle: BUNDLE, transcript: '/x.jsonl', injected: true }
 
@@ -122,6 +124,57 @@ test('one compaction: PreCompact opens it, session.compact fills the numbers, Se
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the Summary tab: the result\'s first message, with the token counts and the arc size above it', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const SUM = { role: 'user', text: 'This session is being continued from a previous conversation. The user asked for a pane; the plan was kept; the arc was written.', toolUses: [] } as const
+  on('session.compact', () => ({ messages: [SUM, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  // Before any compaction the tab says so.
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-summary' })
+  expect(await ui.find({ type: 'Text', text: /^No compaction watched yet this session/ })).toBeDefined()
+  await ui.unmount()
+
+  status.log = [PRE]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  await $.session.compact({ trigger: 'manual', instructions: 'keep the plan', messages: transcript(143) } as any)
+
+  // Tab 3 (the module remembers the tab): the numbers line, the arc path, then the summary text.
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}82k → 19k tokens {3}summary 128 chars \(~32 tokens\) {3}arc on disk 44k chars \(~11k tokens, 62 turns\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: `arc: ${ARC}` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: keep the plan$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: SUM.text })).toBeDefined()
+  // The bundle is not on this tab, and the monitor's rows are not either.
+  expect(await ui.find({ type: 'Text', text: 'LAST BEFORE COMPACTION' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session/ })).toBeUndefined()
+  // The tab's Button is titled Summary with hotkey 3 (the kit presses by key, not by hotkey).
+  const button = await ui.find({ type: 'Button', key: 'tab-summary' })
+  expect(button?.props).toMatchObject({ label: 'Summary', hotkey: '3' })
+  await ui.press({ key: 'tab-monitor' })
+  expect(await ui.find({ type: 'Text', text: SUM.text })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a summary longer than 9,500 chars is cut for the pane, not for the engine', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const long = { role: 'user', text: 'S'.repeat(12000), toolUses: [] } as const
+  const answer = { messages: [long, ...transcript(2)], tokensBefore: 90000, tokensAfter: 30000 }
+  on('session.compact', () => answer)
+  const result = await $.session.compact({ trigger: 'auto', messages: transcript(10) } as any)
+  expect(result).toEqual(answer)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-summary' })
+  const t = await ui.find({ type: 'Text', text: /^S{9500}\n…\[truncated for the pane\]$/ })
+  expect(t).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}90k → 30k tokens {3}summary 10k chars/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /arc on disk no record \(press r\)/ })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
   await ui.unmount()
 })
 

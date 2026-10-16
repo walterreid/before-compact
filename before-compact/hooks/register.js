@@ -9,6 +9,9 @@
 //     summary took, what triggered it, and whether the two settings hooks in this
 //     plugin (PreCompact → save, SessionStart → re-inject) reported success
 //   • a second tab showing the actual bundle that was re-injected
+//   • a third tab showing the summary the engine installed, with the token counts
+//     before and after and the size of the arc file on disk beside them, so a
+//     person can compare what the summary kept against what it cost
 //
 // Where each number comes from:
 //   session.compact        the event the engine fires around a compaction. After
@@ -104,7 +107,7 @@ const compactions = atom({ plugin: 'before-compact', key: 'compactions' }, [])
 const pending = atom({ plugin: 'before-compact', key: 'pending' }, null)
 
 // ---- module state (lost on reload; fine for a monitor) ---------------------
-let tab = 'monitor'            // 'monitor' | 'bundle'
+let tab = 'monitor'            // 'monitor' | 'bundle' | 'summary'
 let usage = null               // { tokens, window, percent } from $.session.usage(), for the gauge
 let messageCount = null        // length of $.session.messages(), for the gauge
 let bundleText = ''            // the last bundle, for the second tab
@@ -242,6 +245,7 @@ function row(fields) {
     preAt: null, saved: null, savedTurns: null, savedTokens: null, bundle: null,
     postAt: null, injected: null, injectedTokens: null, origin: null,
     modAppended: null, modChars: null,
+    summary: null, arc: null, arcTurns: null, arcChars: null,
     ...fields,
     ...(fields.id ? {} : { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }),
   }
@@ -255,6 +259,11 @@ function row(fields) {
 //                           late), completes the newest row without a ✓; else opens
 //                           a pending entry
 //   SessionStart record   → completes the newest row that has no ✓ yet
+// The arc fields of a status record, when it has them (PreCompact always; a
+// SessionStart record when the fallback path wrote the arc).
+function arcOf(rec) {
+  return rec.arc_chars != null ? { arc: rec.arc ?? null, arcTurns: rec.arc_turns ?? null, arcChars: rec.arc_chars } : {}
+}
 // The newest main-conversation row whose `field` is still unknown, or -1.
 function newestOpen(list, field) {
   for (let k = list.length - 1; k >= 0; k--) if (list[k][field] == null && list[k].agentId == null) return k
@@ -266,7 +275,7 @@ function fold(log, list, pend) {
     if (list.some((c) => c.preAt === key || c.postAt === key)) continue
     if (pend && (pend.preAt === key || pend.postAt === key)) continue
     if (rec.event === 'PreCompact') {
-      const fields = { preAt: key, saved: Boolean(rec.written), savedTurns: rec.turns ?? null, savedTokens: rec.tokens_est ?? null, bundle: rec.bundle ?? null }
+      const fields = { preAt: key, saved: Boolean(rec.written), savedTurns: rec.turns ?? null, savedTokens: rec.tokens_est ?? null, bundle: rec.bundle ?? null, ...arcOf(rec) }
       const i = pend && pend.preAt == null ? -1 : newestOpen(list, 'preAt')
       if (pend && pend.preAt == null) {
         pend = { ...pend, ...fields, trigger: pend.trigger || rec.trigger || null }
@@ -277,7 +286,7 @@ function fold(log, list, pend) {
         pend = { startedAt: key, trigger: rec.trigger || null, ...fields }
       }
     } else if (rec.event === 'SessionStart' && rec.source === 'compact') {
-      const done = { postAt: key, injected: rec.injected !== false, injectedTokens: rec.tokens_est ?? null, origin: rec.origin ?? null }
+      const done = { postAt: key, injected: rec.injected !== false, injectedTokens: rec.tokens_est ?? null, origin: rec.origin ?? null, ...arcOf(rec) }
       // The mod's own row already says what it appended; the script's record only
       // confirms it (a stood-down record carries the count it read from the marker).
       if (rec.mod_appended != null) Object.assign(done, { modAppended: rec.mod_appended, modChars: rec.mod_chars ?? null })
@@ -353,11 +362,16 @@ export function register(on, options) {
       await update($, pending, () => null)
       return result
     }
+    // The first message of the result is the summary the engine installed
+    // (from a hook that answered with its own list, whatever it put first).
+    const first = result.messages[0]
+    const summaryText = first && typeof first.text === 'string' ? first.text : ''
     const numbers = {
       trigger: e.trigger, agentId: e.agentId ?? null, instructions: e.instructions ?? null,
       durationMs: Date.now() - t0,
       beforeTokens: result.tokensBefore ?? null, afterTokens: result.tokensAfter ?? null,
       beforeMessages: e.messages.length, afterMessages: result.messages.length,
+      summary: summaryText ? (summaryText.length > 9500 ? summaryText.slice(0, 9500) + '\n…[truncated for the pane]' : summaryText) : null,
     }
     if (e.agentId != null) {
       // A subagent's own transcript: no settings hooks fire for it, so it gets a
@@ -458,12 +472,33 @@ export function register(on, options) {
       children: [
         tabButton('monitor', 'Monitor', '1'),
         tabButton('bundle', 'Last bundle', '2'),
+        tabButton('summary', 'Summary', '3'),
         Button({ key: 'refresh', label: 'Refresh', hotkey: 'r', plain: true, onPress: async () => { await refreshLive($); await syncStatus($); await probeTranscript($); const l = (await read($, compactions)); const last = l[l.length - 1]; if (last) await loadBundle($, last.bundle); redraw() } }),
       ],
     })
 
     let body
-    if (tab === 'bundle') {
+    if (tab === 'summary') {
+      // The newest compaction the mod watched, with the summary the engine installed.
+      const c = list[list.length - 1]
+      if (!c) {
+        body = [Text({ dimColor: true, children: ['No compaction watched yet this session. The next one (run /compact to try it) puts its summary here.'] })]
+      } else {
+        const n = list.length
+        const sumChars = c.summary ? c.summary.length : 0
+        body = [
+          Text({ bold: true, children: [`#${n}  ${fmtK(c.beforeTokens)} → ${fmtK(c.afterTokens)} tokens   summary ${fmtK(sumChars)} chars (~${fmtK(Math.round(sumChars / 4))} tokens)   arc on disk ${c.arcChars != null ? `${fmtK(c.arcChars)} chars (~${fmtK(Math.round(c.arcChars / 4))} tokens, ${c.arcTurns ?? '?'} turns)` : 'no record (press r)'}`] }),
+          Text({ dimColor: true, children: [c.arc ? `arc: ${c.arc}` : 'arc: not written for this compaction'] }),
+          ...(c.instructions ? [Text({ dimColor: true, wrap: 'wrap', children: [`instructions given to the summarizer: ${c.instructions}`] })] : []),
+          Text({ children: [' '] }),
+          Text({ dimColor: true, children: ['The summary the engine installed (the first message after compaction), verbatim:'] }),
+          Text({ children: [' '] }),
+          c.summary
+            ? Text({ wrap: 'wrap', children: [c.summary] })
+            : Text({ dimColor: true, children: ['(the result\'s first message had no text)'] }),
+        ]
+      }
+    } else if (tab === 'bundle') {
       const recoverButton = Button({ key: 'recover', label: recovering ? 'Recovering…' : 'Recover from transcript', hotkey: 'g', onPress: () => { if (!recovering) recoverFromTranscript($) } })
       body = bundleText
         ? [Text({ dimColor: true, children: ['The last turns before the most recent compaction, as the hook put them back (or as --recover reads them from the transcript):'] }),

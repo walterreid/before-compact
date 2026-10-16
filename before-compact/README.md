@@ -15,8 +15,8 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 | `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the `/compact` instructions and how long the summary took. With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
 | `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks |
-| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, and a tab showing the bundle that was re-injected. Toasts when a compaction starts and finishes |
-| `types/index.d.ts` | load time | declares the two `$.state` values (the log and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
+| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, and a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it. Toasts when a compaction starts and finishes |
+| `types/index.d.ts` | load time | declares the two `$.state` values (the log, with each row's summary text and arc size, and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
 
 The two hooks are tiers 2 and 3 from the script's own header. Tier 1 (a "Compaction
 Recovery" clause in AGENTS.md that tells the agent to run `--recover`) is no longer needed
@@ -26,7 +26,7 @@ once the plugin is installed, but it does no harm.
 
 Type `/before-compact`. The pane shows:
 
-    1: Monitor   2: Last bundle   r: Refresh
+    1: Monitor   2: Last bundle   3: Summary   r: Refresh
 
     Context now
     ▕████████████░░░░░░░░░░░░░░░░░░▏ 41%  82k / 200k tokens
@@ -50,6 +50,20 @@ every 2 s. The ✓ marks come from a status record the script writes to
 `~/.claude/before-compact/` inside each settings hook; a `?` means no record arrived (press
 `r`). Two ✓ marks and a drop in the numbers is what "compaction is working" looks like.
 Press `2` for the exact text that went back into context. Esc closes the pane.
+
+Press `3` for the **Summary** tab: the summary the engine installed, verbatim (the first
+message of the `session.compact` result, capped at 9,500 characters for the pane), under
+one line with the token counts before and after, the summary's own size, and the size of
+the arc file on disk:
+
+    #1  82k → 19k tokens   summary 2k chars (~512 tokens)   arc on disk 44k chars (~11k tokens, 62 turns)
+    arc: /Users/you/.claude/plugins/data/before-compact-inline/arc-<session>.txt
+    instructions given to the summarizer: keep the plan
+
+That is the comparison the tab is for: what the summary kept (its text and size) against
+what it cost (the before and after counts) and what it replaced (the arc). The summary
+text is kept in `$.state` with the row, so a reload keeps it; the tab shows the newest
+compaction the mod watched.
 
 The log lives in `$.state`, so saving `register.js` or `/reload-plugins` keeps it; `/clear`,
 `/resume` and `/branch` reset it, as they reset every mod's state. A subagent's own
@@ -151,7 +165,7 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
 | `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, named by the pointer line with its turn count, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
-| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the experiment on and off, the error line | Claude Code 2.1.287 or later |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the experiment on and off, the error line | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
 Then the live layer, the only one that proves the conversation actually changed. Nothing
