@@ -1,0 +1,6 @@
+{
+  "name": "remembrance",
+  "description": "Keeps your voice across compaction. A PreCompact hook saves the last turns verbatim; a SessionStart hook re-injects them after compaction. /remembrance:recover does it on demand.",
+  "version": "0.1.0",
+  "author": { "name": "remembrance author" }
+}

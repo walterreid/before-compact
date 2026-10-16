@@ -1,0 +1,50 @@
+{
+  "description": "Compaction recovery: prepare the last turns before compaction, re-inject them after.",
+  "modules": [
+    "./register.js"
+  ],
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/extract_tail.mjs",
+              "--hook",
+              "--role",
+              "user",
+              "--max-chars",
+              "9000"
+            ],
+            "timeout": 20,
+            "statusMessage": "Saving the last turns before compaction"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/extract_tail.mjs",
+              "--hook",
+              "--role",
+              "user",
+              "--max-chars",
+              "9000"
+            ],
+            "timeout": 20,
+            "statusMessage": "Restoring your voice from before compaction"
+          }
+        ]
+      }
+    ]
+  }
+}
