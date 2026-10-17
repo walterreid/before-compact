@@ -357,3 +357,43 @@ confused the golden hashes with the test gates; nothing ties it to the blocks.
 **What would change the conclusion.** A repeat on new compactions with a second, different
 judge per session; or the same session compacted twice, with and without the plugin, and
 the real next hour of work compared.
+
+### Rerun of the before-compact pair after 0.3.4 (2026-10-17)
+
+**What changed in 0.3.4.** An assistant text that ends its turn is now kept at any length;
+mid-turn notes under 200 characters still go, and the harness's "No response requested." is
+always dropped. Both framings gained one sentence: "A turn missing here is not evidence it did
+not happen; the transcript has every turn."
+
+**Measured on the three windows,** with each transcript cut at its compaction boundary:
+
+| Window | Assistant turns, 0.3.3 to 0.3.4 | Short turn-ending replies kept | Notes in place of turns |
+| --- | --- | --- | --- |
+| before-compact | 9 to 11 | 2, including "Push done and confirmed" | 1 to 3 |
+| 2d-pixel-room-builder | 7 to 7 | 1 | 3 to 3 |
+| clockwork-reels | 5 to 7 | 1 | 1 to 3 |
+
+Every printed output stayed under 9,000 characters. The cost is in the last column: the kept
+replies take budget, so one or two older long turns become notes.
+
+**The rerun.** The same reader instructions, a new pair of readers, the before-compact
+summary, blocks rebuilt by 0.3.4, and a fresh blind judge with a new label key. Counts are
+hooks / summary only.
+
+| Round | Verdict | Catches | False alarms | Errors | Steps that go wrong | Unnecessary checks |
+| --- | --- | --- | --- | --- | --- | --- |
+| First, the blocks the session received | hooks, slight | 7 / 3 | 1 / 3 | 1 / 0 | 0 / 0 | 2 / 2 |
+| Rerun, 0.3.4 blocks | hooks, moderate | 3 / 1 | 1 / 3 | 0 / 0 | 0 / 1 | 0 / 2 |
+
+The hooks reader saw "Push done" this time. It did not call the push unconfirmed; it said the
+material does not settle which commit was pushed, and the judge confirmed the window never
+names it. The summary-only reader would have asked the user what "continue" meant, which the
+window had settled.
+
+**Caveats.** The 0.3.4 blocks differ from the session's original blocks in more than this
+filter: the relayed-message filter, the leftover pass and the newest-turn allowance came after
+them. Each reader ran once. The rebuilt blocks named scratch paths, which the hooks reader
+noticed and which would not happen in real use; that note was shortened in the judge's copy so
+the path could not reveal the condition. The summary-only reader again used the repository's
+context. So the rerun shows that the specific failure, a missing confirmation read as "did not
+happen", did not recur. It does not isolate the change's effect on the verdict.

@@ -51,7 +51,11 @@
 //                   environment Claude Code exports, CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS;
 //                   absent means the default, on).
 //      --min-chars N skips turns shorter than N characters (default 0). The assistant
-//      hook passes 200 so one-line progress notes are left out; --assistant-max 1500
+//      hook passes 200 so one-line progress notes are left out. Since 0.3.4 the filter
+//      applies to mid-turn texts only: an assistant text that ends its turn (the last thing
+//      said before the user spoke again, with no tool call after it) is kept at any
+//      length, because those are the status replies ("Push done and confirmed."). The
+//      harness's "No response requested." is never kept; --assistant-max 1500
 //      keeps the lead of each longer turn, and --newest-turns 2 --newest-max 4000 keep
 //      the newest two whole up to 4,000 (the last report before a compaction is the one
 //      most worth keeping). Both sides honour the inject_in_mod stand-down marker;
@@ -149,8 +153,13 @@ const ARC = { role: 'both', assistMax: Infinity, userMax: Infinity, minChars: 0,
 const BUNDLE_MAX_AGE_MS = 15 * 60 * 1000; // a PreCompact bundle older than this is stale
 // In hook mode the budget covers the whole printed output. The framing sentence,
 // the pointer line and the stats line are fixed text around the turns; reserve
-// room for them so the total stays under --max-chars.
-const HOOK_RESERVE = 800;
+// room for them so the total stays under --max-chars. 900 since 0.3.4: the framing
+// gained one sentence (ABSENT).
+const HOOK_RESERVE = 900;
+// One sentence in both framings, since 0.3.4. In the blind comparison of 2026-10-17 a reader
+// took a turn missing from the assistant block as proof the step never happened: the push
+// confirmation had been left out for being short.
+const ABSENT = 'A turn missing here is not evidence it did not happen; the transcript has every turn.';
 const MIN_LEAD = 300; // the leftover pass gives a noted turn its lead only when at least this many chars of it fit
 
 // Write one extraction to a file, with its stats line last. Returns the number of
@@ -463,12 +472,28 @@ function extract(T, o = {}) {
   // Walk backward from the end, newest first, so the budget keeps the most recent turns.
   const collected = [];
   let budget = isFinite(maxChars) ? Math.max(200, maxChars - reserve) : maxChars;
-  let noted = 0, stopped = false, assistants = 0;
+  let noted = 0, stopped = false, assistants = 0, shortFinals = 0;
+  // What comes after this event in the transcript, tracked while walking backward: 'end' (nothing),
+  // 'user' (a message from the user's side, so the turn ended), or 'more' (a tool call, a tool
+  // result, or another assistant text). An assistant text ends its turn when its own entry has
+  // no tool call after the text and the next event is 'user' or 'end'.
+  let after = 'end';
   for (let i = startIdx; i > floor && collected.length < turns; i--) {
     let ev;
     try { ev = JSON.parse(lines[i]); } catch { continue; }
     const who = ev.type === 'user' ? 'USER' : ev.type === 'assistant' ? 'ASSISTANT' : null;
     if (!who) continue;
+    const blocks = Array.isArray(ev.message && ev.message.content) ? ev.message.content : [];
+    let endsTurn = false;
+    if (who === 'ASSISTANT') {
+      const lastText = blocks.map((b) => b && b.type).lastIndexOf('text');
+      const toolAfter = blocks.some((b, k) => k > lastText && b && b.type === 'tool_use');
+      endsTurn = lastText >= 0 && !toolAfter && after !== 'more';
+      if (lastText >= 0 || blocks.some((b) => b && b.type === 'tool_use')) after = 'more';
+    } else {
+      const toolResults = blocks.length && blocks.every((b) => b && b.type === 'tool_result');
+      after = toolResults ? 'more' : 'user';
+    }
     if (role !== 'both' && role !== who.toLowerCase()) continue;
     const msg = ev.message;
     if (!msg) continue;
@@ -480,7 +505,10 @@ function extract(T, o = {}) {
     if (!RAW && who === 'USER' && role === 'user') txt = stripRelayed(txt);
     if (!txt) continue;
     if (!RAW && summaries.has(i)) continue;               // the injected summary, not a real turn
-    if (txt.length < minChars) continue;                   // --min-chars: a progress line, not a turn worth the budget
+    if (!RAW && who === 'ASSISTANT' && /^No response requested\.?$/.test(txt)) continue; // the harness's, not a reply
+    // --min-chars: a mid-turn progress line, not a turn worth the budget. A text that ends its
+    // turn is kept at any length: it is the status the user got.
+    if (txt.length < minChars) { if (!(who === 'ASSISTANT' && endsTurn)) continue; shortFinals++; }
     const full = txt.length;
     // The newest --newest-turns assistant turns are cut at --newest-max, when that is the larger.
     const cap = who === 'USER' ? userMax
@@ -539,7 +567,7 @@ function extract(T, o = {}) {
     `  ·  ~${Math.round(chars / 4)} tokens  ·  source: ${T}]` +
     (RECOVER ? `\n[recover: ${recoverNote}]` : '') +
     (isFinite(maxChars) && budgetBits ? `\n[budget: --max-chars ${maxChars}${reserve ? ` (${reserve} reserved for the framing)` : ''}: ${budgetBits}]` : '');
-  return { body, stats, count: kept.length, noted, leads, tokens: Math.round(chars / 4), epoch };
+  return { body, stats, count: kept.length, noted, leads, shortFinals, tokens: Math.round(chars / 4), epoch };
 }
 
 // ---- probe mode: what does the transcript say about past compactions? ------
@@ -613,6 +641,7 @@ if (HOOK) {
     }
     rec.noted = out.noted;
     rec.leads = out.leads;
+    if (ASSISTANT) rec.short_finals = out.shortFinals;
     recordStatus(hook.session_id, rec);
     process.exit(0);
   }
@@ -666,7 +695,7 @@ if (HOOK) {
       // The assistant's own turns: one block of their own, under their own cap; the
       // user side's hook prints the user's turns, the pointer line and the digest.
       const cuts = [
-        MIN_CHARS > 0 ? `turns shorter than ${MIN_CHARS} characters were left out` : '',
+        MIN_CHARS > 0 ? `turns shorter than ${MIN_CHARS} characters were left out unless they ended a turn` : '',
         !isFinite(ASSIST_MAX) || ASSIST_MAX <= 0 ? ''
           : NEWEST_TURNS > 0 && NEWEST_MAX > ASSIST_MAX
             ? `the newest ${NEWEST_TURNS} turns are cut after ${NEWEST_MAX} characters and older ones after ${ASSIST_MAX}`
@@ -677,7 +706,7 @@ if (HOOK) {
         `the context was compacted (${origin}). They are what the assistant concluded and reported ` +
         `at each step, which the compaction summary condensed; the user's own turns from the same ` +
         `stretch are a separate block. Oldest to newest; the [-N] index counts back from the most ` +
-        `recent turn${cuts ? `; ${cuts}` : ''}.\n`;
+        `recent turn${cuts ? `; ${cuts}` : ''}. ${ABSENT}\n`;
       const output = `${framing}${text}`;
       recordStatus(hook.session_id, {
         ...src, origin, injected: true, chars: output.length, tokens_est: Math.round(output.length / 4),
@@ -692,7 +721,7 @@ if (HOOK) {
       `The following are verbatim prior turns from this same session, from just before ` +
       `the context was compacted (${origin}). They preserve the user's voice and the ` +
       `exact last steps that the compaction summary flattened. Oldest to newest; the ` +
-      `[-N] index counts back from the most recent turn.\n`;
+      `[-N] index counts back from the most recent turn. ${ABSENT}\n`;
     const pointer = pointerLine(arc);
     // The digest experiment: a fresh digest goes first, under its own factual line,
     // and the whole output stays under the budget: the digest gets at most

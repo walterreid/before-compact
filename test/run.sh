@@ -245,13 +245,15 @@ assert r["min_chars"]==200 and r["assistant_max"]==1500, r
 PY
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
 [[ "$out" == "The following are the assistant's own prior turns from this same session, from just before the context was compacted (prepared by the PreCompact hook)."* ]] || fail "the assistant SessionStart output does not start with its own framing"
-grep -q "turns shorter than 200 characters were left out, and the newest 2 turns are cut after 4000 characters and older ones after 1500" <<<"$out" || fail "the assistant framing does not state the min-chars, newest-turn and assistant-max rules"
+grep -q "turns shorter than 200 characters were left out unless they ended a turn, and the newest 2 turns are cut after 4000 characters and older ones after 1500" <<<"$out" || fail "the assistant framing does not state the min-chars, newest-turn and assistant-max rules"
 grep -q "===== ASSISTANT" <<<"$out" || fail "the assistant SessionStart output has no assistant turn"
 grep -q "===== USER" <<<"$out" && fail "the assistant SessionStart output holds a user turn"
 grep -q "LAST BEFORE COMPACTION" <<<"$out" && fail "the assistant SessionStart output holds the newest user turn's text"
 grep -q "is in $W/data/arc-" <<<"$out" && fail "the assistant SessionStart output has an arc pointer line; the user side prints it"
 grep -q "A digest of the dialog\|THIS EPOCH DIGEST" <<<"$out" && fail "the assistant SessionStart output has the digest block although the digest is fresh; the user side prints it"
-grep -q "^ok$" <<<"$out" && fail "the 2-char assistant turn 'ok' was not skipped by --min-chars 200"
+# "ok" is the last reply before the compaction, so it ends its turn: kept since 0.3.4 although it is
+# under --min-chars 200. Mid-turn short notes still go (the finals fixture below).
+grep -q "^ok$" <<<"$out" || fail "the 2-char turn-ending reply 'ok' should be kept since 0.3.4"
 grep -q "^assistant 30 x" <<<"$out" || fail "the newest long assistant turn is missing from the assistant output"
 grep -q "chars truncated" <<<"$out" && fail "an 813-char assistant turn was cut under --assistant-max 1500"
 [ "$(wc -c <<<"$out")" -lt 9000 ] || fail "the assistant SessionStart output is not under 9000 chars"
@@ -369,4 +371,27 @@ grep -q "the newest 2 turns are cut after 4000 characters and older ones after 1
 # --newest-turns 0 is the flat cap again.
 echo '{"session_id":"flat","transcript_path":"'"$W/newest.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" --hook --side assistant --role assistant --assistant-max 1500 --newest-turns 0 --min-chars 200 --max-chars 9000
 grep -q "END-5" "$W/data/precompact-flat-assistant.txt" && fail "--newest-turns 0 should cut the newest turn at 1,500 too"
+
+# 0.3.4, from the blind comparison: a reader took "Push done and confirmed." being absent from the
+# assistant block as proof the push never happened; --min-chars 200 had left it out. Now a text that
+# ends its turn is kept at any length, mid-turn notes still go, and both framings say that a missing
+# turn is not evidence. Fixture: test/make_fixtures_034.py.
+python3 "$HERE/make_fixtures_034.py" "$W/finals.jsonl"
+echo '{"session_id":"finals","transcript_path":"'"$W/finals.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" "${AS[@]}"
+FB="$W/data/precompact-finals-assistant.txt"
+for t in "LONG-FINAL-1" "Push done and confirmed." "LONG-FINAL-3" "All green."; do
+  grep -q "$t" "$FB" || fail "assistant side: the turn-ending text '$t' is missing"
+done
+for t in "Reading the files now." "Checking one more thing." "No response requested."; do
+  grep -q "$t" "$FB" && fail "assistant side: '$t' should have been left out"
+done
+python3 -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x["event"]=="PreCompact"][-1]; assert r["side"]=="assistant" and r["turns"]==4 and r["short_finals"]==2, r' "$HOME/.claude/before-compact/status-finals.jsonl" || fail "the finals status record should say 4 turns and 2 short finals"
+out=$(echo '{"session_id":"finals","transcript_path":"'"$W/finals.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
+grep -q "turns shorter than 200 characters were left out unless they ended a turn" <<<"$out" || fail "the assistant framing does not say short turn-ending texts are kept"
+grep -q "A turn missing here is not evidence it did not happen; the transcript has every turn." <<<"$out" || fail "the assistant framing lacks the absence sentence"
+echo '{"session_id":"finals","transcript_path":"'"$W/finals.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" --hook --role user --max-chars 9000
+out=$(echo '{"session_id":"finals","transcript_path":"'"$W/finals.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000)
+grep -q "A turn missing here is not evidence it did not happen; the transcript has every turn." <<<"$out" || fail "the user framing lacks the absence sentence"
+# Without --min-chars nothing changes: every text is kept, mid-turn ones included.
+grep -q "Reading the files now." <<<"$(node "$S" --file "$W/finals.jsonl" --role assistant --assistant-max 1500)" || fail "with no --min-chars a mid-turn text should be kept"
 echo "all checks passed"
