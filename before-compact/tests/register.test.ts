@@ -17,6 +17,9 @@
 // mod hook's next(e), or that $.state survives a real reload (the kit holds state for
 // one test only).
 import { expect, mock, test } from 'claude-code/testing'
+// The summary_instructions default: the plugin's brief. plugin.json's `default` holds
+// the same text (test/run.sh checks), and that is what seeds register(on, options) here.
+import { BRIEF } from '../hooks/brief.js'
 
 const HOME = '/home/t'
 const SESSION = 'sess1'
@@ -94,7 +97,8 @@ test('one compaction: PreCompact opens it, session.compact fills the numbers, Se
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}143 → 7 messages {3}\d+\.\d s$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan$/ })).toBeDefined()
+  // The knob's default brief went down too; the row shows it as a size, the typed text in full.
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: keep the plan \\+ summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\)$`) })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /PreCompact {2}✓ saved 32 user turns \(~1k tokens\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /SessionStart \? no status record \(press r\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
@@ -149,7 +153,7 @@ test('the Summary tab: the result\'s first message, with the token counts and th
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^#1 {2}82k → 19k tokens {3}summary 128 chars \(~32 tokens\) {3}arc on disk 44k chars \(~10k tokens, 62 turns\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: `arc: ${ARC}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: keep the plan$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: `instructions given to the summarizer: keep the plan\n${BRIEF}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: SUM.text })).toBeDefined()
   // The bundle is not on this tab, and the monitor's rows are not either.
   expect(await ui.find({ type: 'Text', text: 'LAST BEFORE COMPACTION' })).toBeUndefined()
@@ -337,8 +341,41 @@ test('inject_in_mod off (the default): the result is untouched and no marker is 
 
 // --- the knob (userConfig summary_instructions) ----------------------------------
 // What these prove: what the stub standing in for the engine receives as the
-// event's instructions, with the knob set and with it empty. What they cannot
-// prove: how much a live summarizer honours the text. The Summary tab is for that.
+// event's instructions, with the knob at its default (the plugin's brief), set to
+// the person's own text, and cleared. What they cannot prove: how much a live
+// summarizer honours the text. The Summary tab is for that.
+
+test('summary_instructions default: the plugin\'s brief goes down after what was typed, and alone on an auto compaction', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const seen: any[] = []
+  on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 } })
+
+  // The brief is prose written for this plugin's goal, and says the four things it is for.
+  expect(BRIEF.length).toBeGreaterThan(200)
+  expect(BRIEF).toMatch(/constraints and corrections, quoted verbatim/)
+  expect(BRIEF).toMatch(/latest state/)
+  expect(BRIEF).toMatch(/reversed or changed, say so and give the reason/)
+  expect(BRIEF).toMatch(/verified by running, reading or testing separate from what was assumed or inferred/)
+  expect(BRIEF).toMatch(/open threads/)
+  expect(BRIEF).not.toMatch(/\n/)
+
+  const result = await $.session.compact({ trigger: 'manual', instructions: 'keep the plan', messages: transcript(10) } as any)
+  expect(seen[0].instructions).toBe(`keep the plan\n${BRIEF}`)
+  expect(result).toEqual({ messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 })
+  await $.session.compact({ trigger: 'auto', messages: transcript(4) } as any)
+  expect(seen[1].instructions).toBe(BRIEF)
+
+  // The rows: typed text in full, the brief as a size; the Summary tab has the whole text.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: keep the plan \\+ summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\)$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\) only$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: .*${BRIEF.slice(0, 20)}`) })).toBeUndefined()
+  await ui.press({ key: 'tab-summary' })
+  expect(await ui.find({ type: 'Text', text: `instructions given to the summarizer: ${BRIEF}` })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
 
 test('summary_instructions set: the engine receives the /compact text and the knob\'s text, joined by a newline', async ($, on) => {
   const status = { log: [] as unknown[] }
@@ -363,9 +400,10 @@ test('summary_instructions set: the engine receives the /compact text and the kn
   await $.session.compact({ trigger: 'auto', messages: transcript(4) } as any)
   expect(seen[1].instructions).toBe('Keep every file path and every command verbatim.')
 
-  // The rows show what the summarizer was told, not only what was typed.
+  // The rows show the typed text and the knob's size; the Summary tab shows the whole text.
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan\nKeep every file path and every command verbatim\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan \+ summary_instructions \(48 chars; tab 3 shows it\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: summary_instructions \(48 chars; tab 3 shows it\) only$/ })).toBeDefined()
   await ui.press({ key: 'tab-summary' })
   expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: Keep every file path and every command verbatim\.$/ })).toBeDefined()
   await ui.press({ key: 'tab-monitor' })
@@ -378,11 +416,13 @@ test('summary_instructions set: the engine receives the /compact text and the kn
   expect(seen[2].instructions).toBe('just this')
 })
 
-test('summary_instructions empty (the default): the engine receives the event untouched', async ($, on) => {
+test('summary_instructions cleared: the engine receives the event untouched, and the row shows the typed text alone', async ($, on) => {
   const status = { log: [] as unknown[] }
   stubs($, on, status)
+  on('config.set', ($, e) => ({ value: e.value }))
   const seen: any[] = []
   on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 } })
+  await $.config.set({ key: 'before-compact.summary_instructions', value: '' } as any)
 
   const withText = { trigger: 'manual', instructions: 'keep the plan', messages: transcript(6) }
   await $.session.compact(withText as any)
@@ -393,6 +433,72 @@ test('summary_instructions empty (the default): the engine receives the event un
   await $.session.compact(without as any)
   expect(seen[1].instructions).toBeUndefined()
   expect(seen[1]).toMatchObject(without)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /summary_instructions/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the newest boundary on disk: --probe\'s compactMetadata numbers on the monitor, with no row from session.compact', async ($, on) => {
+  // A Claude Code that runs the mod but never fires session.compact into it (or a
+  // session compacted before the plugin was installed): the log is empty, but the
+  // transcript's compact_boundary entry has the engine's numbers, and the pane shows them.
+  mock.clock(on)
+  mock.env(on, { HOME })
+  const PROJ = `${HOME}/.claude/projects/-work`
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 26000, window: 1000000, percent: 3 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: SESSION }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', ($, e) => ({ value: e.path === PROJ }))
+  on('fs.list', () => ({ value: [{ name: 'abc.jsonl' }] }))
+  on('fs.stat', () => ({ value: { mtimeMs: 1 } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  // What scripts/extract_tail.mjs --probe prints for a transcript with one compact_boundary entry
+  // (the figures are a real boundary's: preTokens 965550, postTokens 25855, 7 preserved uuids).
+  const PROBE = {
+    transcript: `${PROJ}/abc.jsonl`, events: 5079, user_events: 966, assistant_events: 1575, compactions: 1, boundary_source: 'compact_boundary',
+    markers: [{ index: 1857, summary_index: 1858, at: '2026-09-27T15:33:49.229Z', source: 'compact_boundary', summary_chars: 20916,
+      trigger: 'auto', preTokens: 965550, postTokens: 25855, durationMs: 103240, preserved: 7 }],
+  }
+  const runs: string[][] = []
+  on('process.run', ($, e) => { runs.push(e.argv ?? e.command ?? e.args ?? []); return { value: { exitCode: 0, stdout: JSON.stringify(PROBE) + '\n', stderr: '' } } })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 0$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Transcript on disk: 1 compaction marker\(s\) in 5079 events \(more than the log below/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}newest boundary: 966k → 26k tokens, 7 messages preserved \(auto, 103\.2 s; the engine's own numbers, from the transcript\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  // The probe was --probe on the transcript findTranscript picked.
+  expect(JSON.stringify(runs)).toMatch(/--probe/)
+  await ui.unmount()
+})
+
+test('an older transcript: the phrase marker alone gives no engine numbers, and the line says so', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HOME })
+  const PROJ = `${HOME}/.claude/projects/-work`
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1000, window: 200000, percent: 1 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: SESSION }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', ($, e) => ({ value: e.path === PROJ }))
+  on('fs.list', () => ({ value: [{ name: 'abc.jsonl' }] }))
+  on('fs.stat', () => ({ value: { mtimeMs: 1 } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  const PROBE = { transcript: `${PROJ}/abc.jsonl`, events: 66, user_events: 33, assistant_events: 33, compactions: 1, boundary_source: 'phrase',
+    markers: [{ index: 60, summary_index: 60, at: null, source: 'phrase', summary_chars: 70, trigger: null, preTokens: null, postTokens: null, durationMs: null, preserved: null }] }
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(PROBE), stderr: '' } }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Transcript on disk: 1 compaction marker\(s\) in 66 events/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}newest boundary: no engine numbers \(an older transcript/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /→ .* tokens, .* messages preserved/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('a failed --probe shows the useful error line, not node\'s loader preamble', async ($, on) => {

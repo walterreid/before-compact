@@ -11,8 +11,10 @@ export type Compaction = {
   trigger: 'manual' | 'auto' | 'plugin' | null
   /** Set for a subagent's own compaction; null for the main conversation. */
   agentId: string | null
-  /** The text typed after /compact, or a plugin's; null when the default summary prompt alone ran. */
+  /** What the summarizer was told: the text typed after /compact (first) and the summary_instructions knob's text; null when neither. */
   instructions: string | null
+  /** The text typed after /compact alone (or a plugin's), so the row can show it apart from the knob's; null when nothing was typed. */
+  typed: string | null
   /** How long next(e) took in the session.compact hook: the summary's wall time. */
   durationMs: number | null
   /** From the session.compact result (tokensBefore / tokensAfter) and the event's message lists. */

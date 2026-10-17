@@ -12,9 +12,9 @@
   "userConfig": {
     "summary_instructions": {
       "type": "string",
-      "title": "Extra instructions for the compaction summarizer",
-      "description": "Off when empty (default). When set, the mod's session.compact hook appends this text, on its own line, to the instructions the summarizer is given, after anything typed after /compact. How much the summarizer honours instructions is documented to exist, not measured; the pane's Summary tab (3) is where to look.",
-      "default": ""
+      "title": "Instructions for the compaction summarizer",
+      "description": "Appended by the mod's session.compact hook, on its own line, to the instructions the summarizer is given, after anything typed after /compact. The default is this plugin's brief: keep constraints and corrections verbatim, each decision at its latest state with any reversal and its reason, verified apart from assumed, and the open threads. Replace it with your own text, or clear it to send the summarizer nothing extra. How much the summarizer honours it is documented to exist, not measured; the pane's Summary tab (3) is where to look.",
+      "default": "In the summary, keep the user's stated constraints and corrections, quoted verbatim where they are short and otherwise close to their wording. Record each decision with its latest state; where a decision was reversed or changed, say so and give the reason, and prefer the latest state over any earlier one. Keep what was verified by running, reading or testing separate from what was assumed or inferred, and label each. List the open threads: questions not yet answered, work started but not finished, and anything the user said they would come back to."
     },
     "inject_in_mod": {
       "type": "boolean",

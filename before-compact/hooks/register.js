@@ -49,6 +49,7 @@
 // Open it with /before-compact. Esc closes it.
 
 import { atom, read, update } from 'claude-code'
+import { BRIEF } from './brief.js'
 
 const PANE = 'before-compact'
 const STATUS_DIR = '.claude/before-compact' // relative to $HOME
@@ -57,13 +58,16 @@ const STATUS_DIR = '.claude/before-compact' // relative to $HOME
 // register(on, options) seeds these from the manifest's userConfig (defaults
 // filled in); the config.set hook below keeps them current when the person flips
 // a row in /config, so no reload is needed for the change to apply.
-const DEFAULTS = { summary_instructions: '', inject_in_mod: false, inject_turns: 8, inject_max_chars: 9000, digest_in_precompact: false, digest_model: 'haiku', digest_max_tokens: 1500 }
+// summary_instructions defaults to the plugin's brief (hooks/brief.js, the same
+// text as plugin.json's default): an absent value means the brief, a cleared one
+// means off.
+const DEFAULTS = { summary_instructions: BRIEF, inject_in_mod: false, inject_turns: 8, inject_max_chars: 9000, digest_in_precompact: false, digest_model: 'haiku', digest_max_tokens: 1500 }
 let settings = { ...DEFAULTS }
 function readSettings(o) {
   const num = (v, d, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : d }
   const flag = (v) => v === true || v === 'true'
   return {
-    summary_instructions: typeof o.summary_instructions === 'string' ? o.summary_instructions.trim() : '',
+    summary_instructions: typeof o.summary_instructions === 'string' ? o.summary_instructions.trim() : BRIEF,
     inject_in_mod: flag(o.inject_in_mod),
     inject_turns: num(o.inject_turns, DEFAULTS.inject_turns, 1, 50),
     inject_max_chars: num(o.inject_max_chars, DEFAULTS.inject_max_chars, 200, 100000),
@@ -213,7 +217,7 @@ let messageCount = null        // length of $.session.messages(), for the gauge
 let bundleText = ''            // the last bundle, for the second tab
 let digest = null              // the last digest record ({ at, model, chars, turns, text, … }), for the Digest tab
 let lastError = ''
-let transcript = null          // { path, compactions, events, markers } from --probe, or null
+let transcript = null          // --probe's JSON: { transcript, events, compactions, boundary_source, markers: [{ trigger, preTokens, postTokens, durationMs, preserved, … }] }, or null
 let transcriptPath = null      // the .jsonl findTranscript picked, even when --probe failed
 let recovering = false         // the "Recover from transcript" button is running
 
@@ -279,6 +283,17 @@ async function recoverFromTranscript($) {
 }
 
 // ---- helpers ---------------------------------------------------------------
+// The row's instructions line: what was typed after /compact, and the knob's
+// text as a size (it is a paragraph; the Summary tab shows it whole). A row from
+// before `typed` was recorded shows the combined text as it was.
+function instructionsLine(c) {
+  if (c.typed === undefined || c.typed === null && c.instructions === null) return c.instructions
+  const typed = c.typed || ''
+  const knobChars = c.instructions ? c.instructions.length - (typed ? typed.length + 1 : 0) : 0
+  if (knobChars <= 0) return typed
+  const knob = `summary_instructions (${knobChars} chars; tab 3 shows it)`
+  return typed ? `${typed} + ${knob}` : `${knob} only`
+}
 function fmtK(n) {
   if (n == null || !isFinite(n)) return '?'
   return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n)
@@ -355,7 +370,7 @@ async function loadDigest($) {
 // tests see one shape whichever hook filled it in.
 function row(fields) {
   return {
-    id: null, startedAt: null, trigger: null, agentId: null, instructions: null, durationMs: null,
+    id: null, startedAt: null, trigger: null, agentId: null, instructions: null, typed: null, durationMs: null,
     beforeTokens: null, afterTokens: null, beforeMessages: null, afterMessages: null,
     preAt: null, saved: null, savedTurns: null, savedTokens: null, bundle: null,
     postAt: null, injected: null, injectedTokens: null, origin: null,
@@ -473,12 +488,12 @@ export function register(on, options) {
   // and the engine's token counts. Nothing is recorded for a precompute (its
   // result is parked, not installed) or for a compaction a hook vetoed.
   //
-  // The knob (userConfig summary_instructions, empty by default): when set, the
-  // event goes down with the knob's text appended to the instructions, on its
-  // own line after whatever was typed after /compact, so the person's own text
-  // is kept. The types say next({ ...e, instructions }) changes what the
-  // summarizer is told; how much it honours that is not measured here. The
-  // Summary tab shows what came back.
+  // The knob (userConfig summary_instructions, the plugin's brief by default):
+  // when non-empty, the event goes down with the knob's text appended to the
+  // instructions, on its own line after whatever was typed after /compact, so the
+  // person's own text is kept and comes first. The types say next({ ...e,
+  // instructions }) changes what the summarizer is told; how much it honours that
+  // is not measured here. The Summary tab shows what came back.
   on('session.compact', async ($, e, next) => {
     const t0 = Date.now()
     const input = settings.summary_instructions
@@ -496,7 +511,7 @@ export function register(on, options) {
     const first = result.messages[0]
     const summaryText = first && typeof first.text === 'string' ? first.text : ''
     const numbers = {
-      trigger: e.trigger, agentId: e.agentId ?? null, instructions: input.instructions ?? null,
+      trigger: e.trigger, agentId: e.agentId ?? null, instructions: input.instructions ?? null, typed: e.instructions ?? null,
       durationMs: Date.now() - t0,
       beforeTokens: result.tokensBefore ?? null, afterTokens: result.tokensAfter ?? null,
       beforeMessages: e.messages.length, afterMessages: result.messages.length,
@@ -704,7 +719,7 @@ export function register(on, options) {
         const n = list.length - i
         const who = c.agentId ? `agent ${c.agentId}  ` : ''
         rows.push(Text({ bold: true, children: [`#${n}  ${fmtTime(c.postAt || c.startedAt)}  ${who}${c.trigger || '?'}   ${fmtK(c.beforeTokens)} → ${fmtK(c.afterTokens)} tokens   ${c.beforeMessages ?? '?'} → ${c.afterMessages ?? '?'} messages   ${fmtSecs(c.durationMs)}`] }))
-        if (c.instructions) rows.push(Text({ dimColor: true, wrap: 'wrap', children: [`    instructions: ${c.instructions}`] }))
+        if (c.instructions) rows.push(Text({ dimColor: true, wrap: 'wrap', children: [`    instructions: ${instructionsLine(c)}`] }))
         if (c.agentId) {
           rows.push(Text({ dimColor: true, children: ['    a subagent\'s own compaction: the settings hooks do not run for it'] }))
           return
@@ -722,14 +737,24 @@ export function register(on, options) {
       }
 
       const history = transcript
-        ? Text({ dimColor: true, children: [`Transcript on disk: ${transcript.compactions} compaction marker(s) in ${transcript.events} events${transcript.compactions > list.length ? ' (earlier than this plugin was watching; see tab 2)' : ''}`] })
+        ? Text({ dimColor: true, children: [`Transcript on disk: ${transcript.compactions} compaction marker(s) in ${transcript.events} events${transcript.compactions > list.length ? ' (more than the log below: compacted before this plugin was watching, or on a Claude Code that does not fire session.compact; see tab 2)' : ''}`] })
         : transcriptPath
           ? Text({ dimColor: true, children: ['Transcript on disk: found, but --probe failed (see last error below)'] })
           : Text({ dimColor: true, children: ['Transcript on disk: not found for this directory'] })
+      // The newest boundary's own numbers, from the transcript's compact_boundary
+      // entry (--probe reads its compactMetadata). Real figures even where the log
+      // above is empty because session.compact never reached this mod.
+      const newest = transcript && Array.isArray(transcript.markers) && transcript.markers.length ? transcript.markers[transcript.markers.length - 1] : null
+      const boundary = newest
+        ? Text({ dimColor: true, children: [newest.preTokens != null || newest.postTokens != null
+            ? `  newest boundary: ${fmtK(newest.preTokens)} → ${fmtK(newest.postTokens)} tokens, ${newest.preserved ?? '?'} messages preserved (${newest.trigger || '?'}, ${fmtSecs(newest.durationMs)}; the engine's own numbers, from the transcript)`
+            : '  newest boundary: no engine numbers (an older transcript: the phrase marker only, no compact_boundary entry)'] })
+        : null
       body = [
         ...live,
         Text({ bold: true, children: [`Compactions this session: ${list.length}`] }),
         history,
+        ...(boundary ? [boundary] : []),
         ...rows,
         Text({ children: [' '] }),
         Text({ dimColor: true, children: ['How to read it: tokens/messages drop at compaction (the engine\'s own counts); the two ✓ marks mean your last turns were saved before and put back after.'] }),
