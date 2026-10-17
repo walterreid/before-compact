@@ -1,6 +1,6 @@
 {
   "name": "before-compact",
-  "description": "Keeps your last turns, verbatim, across compaction. A PreCompact hook saves the last turns verbatim (and the full arc beside them); a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane with the summary the engine installed.",
+  "description": "Keeps your last turns, verbatim, across compaction. PreCompact hooks save the last turns verbatim, yours and the assistant's as two bundles (and the full arc beside them); SessionStart hooks re-inject each as its own block after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane with the summary the engine installed.",
   "version": "0.2.0",
   "author": {
     "name": "Walter Reid",
@@ -16,6 +16,12 @@
       "title": "Instructions for the compaction summarizer",
       "description": "Appended by the mod's session.compact hook, on its own line, to the instructions the summarizer is given, after anything typed after /compact. The default is this plugin's brief: keep constraints and corrections verbatim, each decision at its latest state with any reversal and its reason, verified apart from assumed, and the open threads. Replace it with your own text, or clear it to send the summarizer nothing extra. How much the summarizer honours it is documented to exist, not measured; the pane's Summary tab (3) is where to look.",
       "default": "In the summary, keep the user's stated constraints and corrections, quoted verbatim where they are short and otherwise close to their wording. Record each decision with its latest state; where a decision was reversed or changed, say so and give the reason, and prefer the latest state over any earlier one. Keep what was verified by running, reading or testing separate from what was assumed or inferred, and label each. List the open threads: questions not yet answered, work started but not finished, and anything the user said they would come back to."
+    },
+    "assistant_turns": {
+      "type": "boolean",
+      "title": "Re-inject the assistant's last turns too",
+      "description": "On (default): a second pair of hooks saves the assistant's own last turns before compaction (turns under 200 characters skipped, each cut at 1,500) and prints them after it as a separate block of up to 9,000 characters, under its own cap, beside your turns. Off: only your turns are saved and re-injected. Read by the script from the CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS variable Claude Code exports to hook processes.",
+      "default": true
     },
     "inject_in_mod": {
       "type": "boolean",

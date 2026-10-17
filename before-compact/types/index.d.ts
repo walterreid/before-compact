@@ -53,6 +53,23 @@ export type Compaction = {
   digest: { model: string; chars: number | null; turns: number | null; durationMs: number | null; error?: string } | null
   /** From the script's SessionStart(compact) record: how many chars of the digest it printed ahead of the turns (0: none was fresh). */
   digestInjected: number | null
+  /**
+   * The assistant side (the second hook of each event, --side assistant): its
+   * PreCompact record (the bundle precompact-<session>-assistant.txt) and its
+   * SessionStart(compact) record, the row's second SessionStart line. Null on a
+   * row from before the assistant side existed, or when no record arrived.
+   * `assistantInjected` false with an origin starting "stood down" or "off" is a
+   * dash in the pane, not a failure.
+   */
+  assistantPreAt: string | null
+  assistantSaved: boolean | null
+  assistantSavedTurns: number | null
+  assistantSavedTokens: number | null
+  assistantBundle: string | null
+  assistantPostAt: string | null
+  assistantInjected: boolean | null
+  assistantTokens: number | null
+  assistantOrigin: string | null
 }
 
 /** The compaction in flight: opened by classic.PreCompact, completed by session.compact. */

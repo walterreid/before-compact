@@ -20,10 +20,14 @@
 //                          `await next(e)` the result carries tokensBefore /
 //                          tokensAfter, and e.messages / result.messages give the
 //                          message counts. No polling, no timers.
-//   classic.PreCompact     only for the ✓ mark: the settings hook (the script) runs
-//   classic.SessionStart   inside this hook's next(e) and writes a status record to
+//   classic.PreCompact     only for the ✓ marks: the settings hooks (the script, run
+//   classic.SessionStart   once per side: the user's turns, then the assistant's)
+//                          run inside this hook's next(e) and write status records to
 //                          ~/.claude/before-compact/status-<session>.json; the hook
-//                          reads that file once next(e) has resolved.
+//                          reads that file once next(e) has resolved. The assistant
+//                          side's SessionStart record is the row's second
+//                          "SessionStart" line; its PreCompact record is folded into
+//                          the row too but draws no line of its own.
 //
 // The compaction log lives in $.state (see ../types/index.d.ts), so a reload of
 // this module keeps it. The pane's tab, the live gauge and the last error are
@@ -80,7 +84,9 @@ function readSettings(o) {
 // ---- the experiment's pieces -----------------------------------------------
 // Where the mod tells the script it has already put the turns back. Same session
 // id on both sides (the script reads hook.session_id), same directory as the
-// status file. The script consumes it (scripts/extract_tail.mjs, takeMarker).
+// status file. The script reads it without deleting it (scripts/extract_tail.mjs,
+// peekMarker): both of its SessionStart hooks, the user side's and the assistant
+// side's, stand down on the same marker, and the script removes it only once stale.
 const markerPath = (home, id) => `${home}/${STATUS_DIR}/injected-${id}.json`
 
 // Harness-injected blocks are not the human voice (same rules as the script).
@@ -377,6 +383,8 @@ function row(fields) {
     modAppended: null, modChars: null,
     summary: null, arc: null, arcTurns: null, arcChars: null, arcTokens: null,
     digest: null, digestInjected: null,
+    assistantPreAt: null, assistantSaved: null, assistantSavedTurns: null, assistantSavedTokens: null, assistantBundle: null,
+    assistantPostAt: null, assistantInjected: null, assistantTokens: null, assistantOrigin: null,
     ...fields,
     ...(fields.id ? {} : { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }),
   }
@@ -390,6 +398,11 @@ function row(fields) {
 //                           late), completes the newest row without a ✓; else opens
 //                           a pending entry
 //   SessionStart record   → completes the newest row that has no ✓ yet
+//   side: "assistant"     → the same two steps against the row's assistant* fields
+//                           (assistantPreAt / assistantPostAt), so the second hook of
+//                           each event lands on the same row as the first and never
+//                           opens a row of its own while the user side's is open.
+//                           A record with no `side` is the user side's (older records).
 // The arc fields of a status record, when it has them (PreCompact always; a
 // SessionStart record when the fallback path wrote the arc).
 function arcOf(rec) {
@@ -403,8 +416,34 @@ function newestOpen(list, field) {
 function fold(log, list, pend) {
   for (const rec of log) {
     const key = rec.at
-    if (list.some((c) => c.preAt === key || c.postAt === key)) continue
-    if (pend && (pend.preAt === key || pend.postAt === key)) continue
+    if (list.some((c) => c.preAt === key || c.postAt === key || c.assistantPreAt === key || c.assistantPostAt === key)) continue
+    if (pend && (pend.preAt === key || pend.postAt === key || pend.assistantPreAt === key || pend.assistantPostAt === key)) continue
+    if (rec.side === 'assistant') {
+      if (rec.event === 'PreCompact') {
+        const fields = { assistantPreAt: key, assistantSaved: Boolean(rec.written), assistantSavedTurns: rec.turns ?? null, assistantSavedTokens: rec.tokens_est ?? null, assistantBundle: rec.bundle ?? null }
+        const i = pend && pend.assistantPreAt == null ? -1 : newestOpen(list, 'assistantPreAt')
+        if (pend && pend.assistantPreAt == null) {
+          pend = { ...pend, ...fields, trigger: pend.trigger || rec.trigger || null }
+        } else if (i >= 0) {
+          list = list.map((c, k) => (k === i ? { ...c, ...fields, trigger: c.trigger || rec.trigger || null } : c))
+        } else {
+          if (pend) list = [...list, row(pend)]
+          pend = { startedAt: key, trigger: rec.trigger || null, ...fields }
+        }
+      } else if (rec.event === 'SessionStart' && rec.source === 'compact') {
+        const done = { assistantPostAt: key, assistantInjected: rec.injected !== false, assistantTokens: rec.tokens_est ?? null, assistantOrigin: rec.origin ?? null }
+        const i = newestOpen(list, 'assistantPostAt')
+        if (i >= 0) {
+          list = list.map((c, k) => (k === i ? { ...c, ...done } : c))
+        } else if (pend) {
+          list = [...list, row({ ...pend, ...done })]
+          pend = null
+        } else {
+          list = [...list, row({ startedAt: key, ...done })]
+        }
+      }
+      continue
+    }
     if (rec.event === 'PreCompact') {
       const fields = { preAt: key, saved: Boolean(rec.written), savedTurns: rec.turns ?? null, savedTokens: rec.tokens_est ?? null, bundle: rec.bundle ?? null, ...arcOf(rec) }
       const i = pend && pend.preAt == null ? -1 : newestOpen(list, 'preAt')
@@ -596,7 +635,7 @@ export function register(on, options) {
       await probeTranscript($)
       await loadDigest($)
       const t = last.injected
-        ? `Restored ${fmtK(last.injectedTokens)} tokens of your voice`
+        ? `Restored ${fmtK(last.injectedTokens)} tokens of your voice${last.assistantInjected ? ` and ${fmtK(last.assistantTokens)} of the assistant's turns` : ''}`
         : last.modAppended != null
           ? `Compaction done — the mod appended ${last.modAppended} of your turns after the summary`
           : 'Compaction done — nothing was re-injected'
@@ -726,6 +765,11 @@ export function register(on, options) {
         }
         rows.push(Text({ color: c.saved ? 'green' : c.saved === false ? 'red' : 'yellow', children: [`    PreCompact  ${c.saved ? '✓' : c.saved === false ? '✗' : '?'} ${c.saved ? `saved ${c.savedTurns} user turns (~${fmtK(c.savedTokens)} tokens)` : c.saved === false ? 'bundle not written' : 'no status record (press r)'}`] }))
         rows.push(Text({ color: c.injected ? 'green' : c.injected === false ? (c.modAppended != null ? 'green' : 'red') : 'yellow', children: [`    SessionStart ${c.injected ? '✓' : c.injected === false ? (c.modAppended != null ? '–' : '✗') : '?'} ${c.injected ? `re-injected ~${fmtK(c.injectedTokens)} tokens (${c.origin || ''})` : c.injected === false ? (c.modAppended != null ? `stood down (${c.origin || ''})` : 'nothing injected') : 'no status record (press r)'}`] }))
+        // The assistant side's SessionStart hook: its own block, its own record. A
+        // stand-down or the option being off is a dash, not a failure; a record that
+        // says it printed nothing for another reason is a ✗; no record is a ?.
+        const aOff = c.assistantInjected === false && /^(stood down|off)\b/.test(c.assistantOrigin || '')
+        rows.push(Text({ color: c.assistantInjected ? 'green' : c.assistantInjected === false ? (aOff ? 'green' : 'red') : 'yellow', dimColor: c.assistantInjected === false && /^off\b/.test(c.assistantOrigin || ''), children: [`    SessionStart ${c.assistantInjected ? '✓' : c.assistantInjected === false ? (aOff ? '–' : '✗') : '?'} ${c.assistantInjected ? `re-injected ~${fmtK(c.assistantTokens)} tokens of the assistant's turns (${c.assistantOrigin || ''})` : c.assistantInjected === false ? (aOff ? `assistant's turns ${/^off\b/.test(c.assistantOrigin || '') ? 'off (assistant_turns)' : `stood down (${c.assistantOrigin || ''})`}` : `nothing of the assistant's turns injected${c.assistantOrigin ? ` (${c.assistantOrigin})` : ''}`) : 'no status record for the assistant\'s turns (press r)'}`] }))
         if (c.modAppended != null) rows.push(Text({ color: c.injected ? 'yellow' : 'green', children: [`    Mod          ✓ appended ${c.modAppended} user turns (~${fmtK(c.modChars)} chars) after the summary${c.injected ? ' — and the script injected too: the stand-down marker was missed' : ''}`] }))
         if (c.digest) rows.push(Text({ color: c.digest.error ? 'red' : 'green', children: [c.digest.error
           ? `    Digest       ✗ ${c.digest.model}: ${c.digest.error}`
@@ -757,7 +801,7 @@ export function register(on, options) {
         ...(boundary ? [boundary] : []),
         ...rows,
         Text({ children: [' '] }),
-        Text({ dimColor: true, children: ['How to read it: tokens/messages drop at compaction (the engine\'s own counts); the two ✓ marks mean your last turns were saved before and put back after.'] }),
+        Text({ dimColor: true, children: ['How to read it: tokens/messages drop at compaction (the engine\'s own counts); the ✓ marks mean your last turns were saved before and put back after, and the second SessionStart line is the assistant\'s own turns, put back as a separate block.'] }),
       ]
     }
 
