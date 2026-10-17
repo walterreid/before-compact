@@ -8,8 +8,8 @@ authors:
     email: walterreid@gmail.com
 repository-code: "https://github.com/walterreid/before-compact"
 license: MIT
-date-released: 2026-10-16
-version: 0.3.0
+date-released: 2026-10-17
+version: 0.3.1
 keywords:
   - claude-code
   - plugin

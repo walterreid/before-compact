@@ -12,10 +12,11 @@
 // The fold handles either order of the script's PreCompact record against the mod's
 // session.compact hook: the first test has the record on disk when classic.PreCompact's
 // next(e) resolves; 'the other order' test has it land only at SessionStart time, after
-// session.compact has already made the row. What the tests cannot prove: which order a
-// live engine uses, that a live SessionStart(compact) settings hook finishes inside the
-// mod hook's next(e), or that $.state survives a real reload (the kit holds state for
-// one test only).
+// session.compact has already made the row; the last test fires classic.SessionStart from
+// inside the engine's session.compact answer, the order the Desktop app used live on
+// 2026-10-17. What the tests cannot prove: that a live SessionStart(compact) settings hook
+// finishes inside the mod hook's next(e), or that $.state survives a real reload (the kit
+// holds state for one test only).
 import { expect, mock, test } from 'claude-code/testing'
 // The summary_instructions default: the plugin's brief. plugin.json's `default` holds
 // the same text (test/run.sh checks), and that is what seeds register(on, options) here.
@@ -23,7 +24,7 @@ import { BRIEF } from '../hooks/brief.js'
 
 const HOME = '/home/t'
 const SESSION = 'sess1'
-const STATUS = `${HOME}/.claude/before-compact/status-${SESSION}.json`
+const STATUS = `${HOME}/.claude/before-compact/status-${SESSION}.jsonl`
 const BUNDLE = '/data/precompact-sess1.txt'
 
 // The two records scripts/extract_tail.mjs writes (see recordStatus there).
@@ -62,7 +63,7 @@ function stubs($: any, on: any, status: { log: unknown[] }, files: Record<string
   // Filesystem: the status file (when it has records) and the bundle exist; nothing
   // else does, so findTranscript returns null and --probe is never run.
   on('fs.exists', ($: any, e: any) => ({ value: (e.path === STATUS && status.log.length > 0) || e.path === BUNDLE || files[e.path] != null }))
-  on('fs.read', ($: any, e: any) => ({ value: e.path === STATUS ? JSON.stringify(status.log) : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : files[e.path] ?? '' }))
+  on('fs.read', ($: any, e: any) => ({ value: e.path === STATUS ? status.log.map((r) => JSON.stringify(r)).join('\n') + '\n' : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : files[e.path] ?? '' }))
   on('process.run', () => ({ deny: 'process.run must not be called when no transcript was found' }))
   const toasts: string[] = []
   const logs: string[] = []
@@ -731,4 +732,38 @@ test('digest_in_precompact on, the call refused or unanswered: nothing written, 
   expect(await ui.find({ type: 'Text', text: /^No digest for this session yet/ })).toBeDefined()
   await ui.press({ key: 'tab-monitor' })
   await ui.unmount()
+})
+
+// Live finding, 2026-10-17 (this plugin's first real compaction, Desktop 2.1.299): the
+// pane's row showed "? → ? tokens, ? → ? messages in ?" next to two ✓ marks. The
+// transcript's timestamps put the SessionStart(compact) settings hooks 100 ms before the
+// engine wrote the compact_boundary entry, so the hooks run inside the compaction, before
+// session.compact's next(e) resolves in this mod. The fold then closes the pending entry
+// into a row with no numbers, and session.compact, finding no pending entry, opens a second
+// row for the numbers. This test fires classic.SessionStart from inside the engine's
+// session.compact answer, as the live run did.
+test('SessionStart fires inside session.compact: one row carries the marks and the numbers', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const { logs } = stubs($, on, status)
+  on('session.compact', async () => {
+    // The engine installs the summary and runs the SessionStart hooks before it answers
+    // (the test's own $ fires the classic event, as the engine would).
+    status.log = [PRE, POST]
+    await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+    return { messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }
+  })
+  status.log = [PRE]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'auto' })
+  await $.session.compact({ trigger: 'auto', messages: transcript(143) } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}auto {3}82k → 19k tokens {3}143 → 7 messages {3}\d+\.\d s$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PreCompact {2}✓ saved 32 user turns/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart ✓ re-injected ~1k tokens/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#2 / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
+  await ui.unmount()
+  // The transcript line waits for the numbers instead of printing question marks.
+  expect(logs).toEqual([expect.stringMatching(/^compaction: 82k → 19k tokens, 143 → 7 messages in \d+\.\d s; bundle re-injected$/)])
 })

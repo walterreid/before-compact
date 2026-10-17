@@ -73,7 +73,7 @@ grep -q "===== ASSISTANT" "$ARC" || fail "the arc has no assistant turns"
 grep -q "chars truncated" "$ARC" && fail "the arc truncated an assistant turn"
 grep -q "system-reminder" "$ARC" && fail "the arc kept harness noise"
 grep -q "budget:" "$ARC" && fail "the arc applied a character budget"
-grep -q '"arc_chars": [1-9]' "$HOME/.claude/before-compact/status-t.json" || fail "the arc's size is not in the PreCompact status record"
+grep -q '"arc_chars":[1-9]' "$HOME/.claude/before-compact/status-t.jsonl" || fail "the arc's size is not in the PreCompact status record"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000)
 grep -q "prepared by the PreCompact hook" <<<"$out" || fail "SessionStart did not use the bundle"
 # The pointer line: names the arc's absolute path, its turn count and its own token figure,
@@ -84,7 +84,7 @@ arc_tokens=$(sed -n 's/^\[[0-9]* turns .*~\([0-9]*\) tokens.*/\1/p' "$ARC" | tai
 grep -q "($arc_turns turns, ~$arc_tokens tokens), is in $ARC\.$" <<<"$out" || fail "the pointer line does not name the arc with the stats line's turn and token figures"
 [ "$(sed -n 2p <<<"$out" | grep -c "$ARC")" = 1 ] || fail "the pointer line is not the line after the framing sentence"
 grep -qi "read that file\|read it when" <<<"$out" && fail "the pointer line is an instruction, not a statement"
-grep -q "\"arc_tokens_est\": $arc_tokens" "$HOME/.claude/before-compact/status-t.json" || fail "the status record's arc_tokens_est is not the stats line's figure"
+grep -q "\"arc_tokens_est\":$arc_tokens" "$HOME/.claude/before-compact/status-t.jsonl" || fail "the status record's arc_tokens_est is not the stats line's figure"
 [ "$(wc -c <<<"$out")" -lt 9000 ] || fail "hook output over the 9000-char budget"
 # The live fallback: sess.jsonl already holds the new summary's marker, so the arc is the
 # window that marker closed (epoch 1), and nothing after the marker leaks into it.
@@ -108,14 +108,14 @@ grep -q "^\[10 turns (5 user / 5 assistant)" "$A3" || fail "the arc's stats line
 out=$(echo '{"session_id":"three","transcript_path":"'"$W/three.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000)
 grep -q "(10 turns, ~[0-9]* tokens), is in $A3\.$" <<<"$out" || fail "the pointer does not name arc-three-3.txt"
 grep -qi "read that file" <<<"$out" && fail "the pointer line is imperative"
-[ -s "$HOME/.claude/before-compact/status-t.json" ] || fail "status record not written under the test HOME"
+[ -s "$HOME/.claude/before-compact/status-t.jsonl" ] || fail "status record not written under the test HOME"
 # inject_in_mod: a fresh stand-down marker from the mod makes SessionStart print nothing and record why.
 M="$HOME/.claude/before-compact/injected-t.json"
 printf '{"at":"%s","trigger":"manual","appended":5,"chars":1200}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$M"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [ -z "$out" ] || fail "SessionStart injected although the mod's marker said it had appended the turns"
 [ -e "$M" ] || fail "the stand-down marker was deleted: it is read, not consumed, so the assistant-side hook can read it too"
-grep -q '"mod_appended": 5' "$HOME/.claude/before-compact/status-t.json" || fail "the stand-down was not recorded in the status file"
+grep -q '"mod_appended":5' "$HOME/.claude/before-compact/status-t.jsonl" || fail "the stand-down was not recorded in the status file"
 # A stale marker (older than 2 minutes) is ignored and removed: the script injects as usual.
 printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":1200}' > "$M"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
@@ -134,7 +134,7 @@ grep -q "digest cut at 4000" <<<"$out" || fail "a 4500-char digest was not cut t
 grep -q "prepared by the PreCompact hook" <<<"$out" || fail "the turns were not printed after the digest"
 grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "the newest user turn is missing after the digest"
 [ "$(wc -c <<<"$out")" -lt 9000 ] || fail "output with a digest is not under 9000 chars"
-grep -q '"digest_chars": 4' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars not recorded in the status record"
+grep -q '"digest_chars":4' "$HOME/.claude/before-compact/status-t.jsonl" || fail "digest_chars not recorded in the status record"
 # A bundle that would overflow with the digest in front: the oldest turns go, the newest stays, still under 9000.
 echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role both >/dev/null
 [ "$(wc -c < "$W/data/precompact-t.txt")" -gt 5000 ] || fail "the --role both bundle is too small to test trimming"
@@ -156,12 +156,12 @@ echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 grep -q "A digest of the dialog" <<<"$out" && fail "a stale digest was injected"
 [[ "$out" == "The following are verbatim prior turns"* ]] || fail "without a fresh digest the output changed"
-grep -q '"digest_skipped": "stale"' "$HOME/.claude/before-compact/status-t.json" || fail "the stale skip was not recorded"
+grep -q '"digest_skipped":"stale"' "$HOME/.claude/before-compact/status-t.jsonl" || fail "the stale skip was not recorded"
 # No digest file at all: unchanged too.
 rm -f "$D"
 out2=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [ "$out" == "$out2" ] || fail "output without a digest file differs from output with a stale one"
-grep -q '"digest_chars": 0' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars 0 not recorded when no digest was injected"
+grep -q '"digest_chars":0' "$HOME/.claude/before-compact/status-t.jsonl" || fail "digest_chars 0 not recorded when no digest was injected"
 # A digest from an EARLIER compaction (5 minutes old, so still fresh) left behind after the flag was turned
 # off: this compaction's bundle is newer than it, so it is the wrong epoch's digest and must not be injected.
 python3 - "$D" <<'PY'
@@ -173,8 +173,8 @@ echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 grep -q "OLD EPOCH DIGEST" <<<"$out" && fail "a digest older than this compaction's bundle was injected"
 [[ "$out" == "The following are verbatim prior turns"* ]] || fail "with an older-epoch digest the output does not start with the turns' framing"
-grep -q '"digest_chars": 0' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars 0 not recorded for the older-epoch digest"
-grep -q '"digest_skipped": "older than the bundle"' "$HOME/.claude/before-compact/status-t.json" || fail "the older-than-the-bundle skip was not recorded"
+grep -q '"digest_chars":0' "$HOME/.claude/before-compact/status-t.jsonl" || fail "digest_chars 0 not recorded for the older-epoch digest"
+grep -q '"digest_skipped":"older than the bundle"' "$HOME/.claude/before-compact/status-t.jsonl" || fail "the older-than-the-bundle skip was not recorded"
 # The same file rewritten now, after that bundle: this epoch's digest, injected.
 python3 - "$D" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
 import json,sys
@@ -183,7 +183,7 @@ PY
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [[ "$out" == "A digest of the dialog before the compaction, written by haiku from the last 4 turns:"* ]] || fail "a digest written after the bundle was not injected"
 grep -q "THIS EPOCH DIGEST" <<<"$out" || fail "this epoch's digest text is missing"
-grep -q '"digest_skipped": null' "$HOME/.claude/before-compact/status-t.json" || fail "an injected digest should record digest_skipped null"
+grep -q '"digest_skipped":null' "$HOME/.claude/before-compact/status-t.jsonl" || fail "an injected digest should record digest_skipped null"
 # ---- the compact_boundary entry is the boundary; the phrase is only a fallback ----
 B="$W/bound.jsonl"
 bidx=$(( $(grep -n '"compact_boundary"' "$B" | cut -d: -f1) - 1 ))   # 0-based transcript index of the entry
@@ -226,7 +226,7 @@ node "$S" --probe --file "$W/pre.jsonl" | grep -q '"compactions":0,"boundary_sou
 # and the user bundle precompact-t.txt exists, so the checks below also prove the assistant side
 # leaves both alone.
 AS=(--hook --side assistant --role assistant --assistant-max 1500 --min-chars 200 --max-chars 9000)
-ST="$HOME/.claude/before-compact/status-t.json"
+ST="$HOME/.claude/before-compact/status-t.jsonl"
 AB="$W/data/precompact-t-assistant.txt"
 arcs_before=$(ls "$W/data" | grep -c '^arc-t-' || true)
 echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" "${AS[@]}" | grep -q . && fail "the assistant PreCompact printed to stdout"
@@ -236,7 +236,7 @@ echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"
 grep -q "===== ASSISTANT" "$AB" || fail "the assistant bundle has no assistant turns"
 grep -q "===== USER" "$AB" && fail "the assistant bundle holds a user turn"
 python3 - "$ST" <<'PY' || fail "the assistant PreCompact status record is wrong (side, written, turns, no arc fields)"
-import json,sys; r=json.load(open(sys.argv[1]))[-1]
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()][-1]
 assert r["event"]=="PreCompact" and r["side"]=="assistant" and r["written"] is True and r["turns"]>0 and r["tokens_est"]>0, r
 assert r["bundle"].endswith("precompact-t-assistant.txt") and "arc" not in r and "arc_chars" not in r, r
 assert r["min_chars"]==200 and r["assistant_max"]==1500, r
@@ -254,7 +254,7 @@ grep -q "^assistant 30 x" <<<"$out" || fail "the newest long assistant turn is m
 grep -q "chars truncated" <<<"$out" && fail "an 813-char assistant turn was cut under --assistant-max 1500"
 [ "$(wc -c <<<"$out")" -lt 9000 ] || fail "the assistant SessionStart output is not under 9000 chars"
 python3 - "$ST" <<'PY' || fail "the assistant SessionStart status record is wrong (side, injected, chars, tokens_est, origin)"
-import json,sys; r=json.load(open(sys.argv[1]))[-1]
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()][-1]
 assert r["event"]=="SessionStart" and r["side"]=="assistant" and r["injected"] is True, r
 assert r["chars"]>0 and r["tokens_est"]>0 and r["origin"]=="prepared by the PreCompact hook", r
 assert "arc" not in r and "digest_chars" not in r, r
@@ -269,7 +269,7 @@ echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=false node "$S" "${AS[@]}")
 [ -z "$out" ] || fail "with assistant_turns off the assistant SessionStart printed something"
 python3 - "$ST" <<'PY' || fail "assistant_turns off was not recorded as injected:false with a reason"
-import json,sys; log=json.load(open(sys.argv[1])); r=log[-1]; q=log[-2]
+import json,sys; log=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; r=log[-1]; q=log[-2]
 assert r["event"]=="SessionStart" and r["side"]=="assistant" and r["injected"] is False and r["origin"].startswith("off: the assistant_turns option is false"), r
 assert q["event"]=="PreCompact" and q["side"]=="assistant" and q["written"] is False and q["origin"].startswith("off"), q
 PY
@@ -293,7 +293,7 @@ out_a=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_even
 [ -z "$out_a" ] || fail "a fresh marker did not stand the assistant side down"
 [ -e "$M" ] || fail "a side deleted the marker; it is read, not consumed"
 python3 - "$ST" <<'PY' || fail "the two stand-downs were not both recorded"
-import json,sys; log=json.load(open(sys.argv[1])); a,b=log[-2],log[-1]
+import json,sys; log=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; a,b=log[-2],log[-1]
 assert {a["side"],b["side"]}=={"user","assistant"}, (a,b)
 for r in (a,b): assert r["event"]=="SessionStart" and r["injected"] is False and r["origin"].startswith("stood down: the mod appended 4 user turns") and r["mod_appended"]==4, r
 PY
@@ -310,4 +310,16 @@ grep -q "prepared by the PreCompact hook" <<<"$out_u" || fail "a marker older th
 grep -q "prepared by the PreCompact hook" <<<"$out_a" || fail "a marker older than the bundle stood the assistant side down"
 [ -e "$M" ] || fail "a marker that is fresh by age was removed"
 rm -f "$M"
+# Live finding, 2026-10-17: the two SessionStart hooks (user side, assistant side) run at the
+# same moment and, with a ready bundle, finish within milliseconds of each other. Each must add
+# its own status record without losing the other's or leaving the file unreadable. 20 pairs.
+touch "$W/data/precompact-t.txt" "$W/data/precompact-t-assistant.txt"
+for i in $(seq 1 20); do
+  n0=$(python3 -c 'import json,sys; print(len([json.loads(l) for l in open(sys.argv[1]) if l.strip()]))' "$ST")
+  ( echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user >/dev/null &
+    echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}" >/dev/null &
+    wait )
+  n1=$(python3 -c 'import json,sys; print(len([json.loads(l) for l in open(sys.argv[1]) if l.strip()]))' "$ST" 2>/dev/null || echo unreadable)
+  [ "$n1" = "$((n0+2))" ] || fail "concurrent SessionStart hooks, pair $i: status records went $n0 -> $n1 (one record lost, or the file unreadable)"
+done
 echo "all checks passed"

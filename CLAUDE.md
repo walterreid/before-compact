@@ -41,8 +41,12 @@ and ask for the pane's `(last error: …)` line. Do not guess.
 
 - The mod's `/before-compact` command is not namespaced; the skill is `/before-compact:recover`.
 - The script and the mod share no memory. They meet through two files under
-  `~/.claude/before-compact/`: `status-<session>.json` (the ✓ marks) and, with the
+  `~/.claude/before-compact/`: `status-<session>.jsonl` (the ✓ marks, one line per hook run,
+  append-only: two hooks of one event write at the same moment) and, with the
   `inject_in_mod` experiment on, `injected-<session>.json` (the stand-down marker).
+- Live on Desktop 2.1.299 (2026-10-17), the SessionStart(compact) settings hooks ran inside
+  the mod's `session.compact` `next(e)`: the ✓ marks reached the mod before the engine's
+  numbers. The fold and the `session.compact` hook handle both orders; keep it that way.
 - The row's numbers come from the `session.compact` event, not from polling; the compaction
   log lives in `$.state` (declared in `types/index.d.ts`) and survives a reload.
 - The kit cannot prove that settings hooks finish inside the `classic.*` hooks' `next(e)`,

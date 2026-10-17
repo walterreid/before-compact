@@ -223,6 +223,8 @@ let messageCount = null        // length of $.session.messages(), for the gauge
 let bundleText = ''            // the last bundle, for the second tab
 let digest = null              // the last digest record ({ at, model, chars, turns, text, … }), for the Digest tab
 let lastError = ''
+let compacting = false         // true while session.compact's next(e) runs for the main conversation
+let held = null                // the id of the row classic.SessionStart closed inside that next(e), awaiting the numbers
 let transcript = null          // --probe's JSON: { transcript, events, compactions, boundary_source, markers: [{ trigger, preTokens, postTokens, durationMs, preserved, … }] }, or null
 let transcriptPath = null      // the .jsonl findTranscript picked, even when --probe failed
 let recovering = false         // the "Recover from transcript" button is running
@@ -338,14 +340,23 @@ async function refreshLive($) {
 }
 
 async function readStatus($) {
-  // The script writes ~/.claude/before-compact/status-<session_id>.json
+  // The script appends one JSON record per line to ~/.claude/before-compact/status-<session_id>.jsonl.
+  // Before 0.3.1 it rewrote a JSON array in status-<session_id>.json; a session that started on
+  // that version is read from there.
   try {
     const home = await $.env.get('HOME')
     const id = await $.session.id()
-    const p = `${home}/${STATUS_DIR}/status-${id}.json`
-    if (!(await $.fs.exists(p))) return []
-    const raw = await $.fs.read(p)
-    const log = JSON.parse(raw)
+    const base = `${home}/${STATUS_DIR}/status-${id}`
+    if (await $.fs.exists(`${base}.jsonl`)) {
+      const log = []
+      for (const line of (await $.fs.read(`${base}.jsonl`)).split('\n')) {
+        if (!line.trim()) continue
+        try { log.push(JSON.parse(line)) } catch { /* a line still being written: it is whole on the next read */ }
+      }
+      return log
+    }
+    if (!(await $.fs.exists(`${base}.json`))) return []
+    const log = JSON.parse(await $.fs.read(`${base}.json`))
     return Array.isArray(log) ? log : []
   } catch (e) { lastError = 'status: ' + msg(e); return [] }
 }
@@ -370,6 +381,12 @@ async function loadDigest($) {
     const d = JSON.parse(await $.fs.read(p))
     digest = d && typeof d.text === 'string' ? d : null
   } catch (e) { digest = null; lastError = 'digest file: ' + msg(e) }
+}
+
+// The dim transcript line for a finished compaction: written once the row has both the
+// engine's numbers and the SessionStart record, whichever hook completes it.
+function logRow($, c) {
+  $.ui.log(`compaction: ${fmtK(c.beforeTokens)} → ${fmtK(c.afterTokens)} tokens, ${c.beforeMessages ?? '?'} → ${c.afterMessages ?? '?'} messages in ${fmtSecs(c.durationMs)}; ${c.injected ? 'bundle re-injected' : c.modAppended != null ? `mod appended ${c.modAppended} turns` : 'no bundle'}`)
 }
 
 // A full row with every field present (null = not known), so the pane and the
@@ -538,7 +555,12 @@ export function register(on, options) {
     const input = settings.summary_instructions
       ? { ...e, instructions: [e.instructions, settings.summary_instructions].filter(Boolean).join('\n') }
       : e
-    const result = await next(input)
+    // Seen live (Desktop 2.1.299, 2026-10-17): the SessionStart(compact) settings hooks ran
+    // inside this next(e), so classic.SessionStart below fired before the numbers were known.
+    // The flag lets it hold the transcript line for this hook to write.
+    compacting = e.agentId == null
+    let result
+    try { result = await next(input) } finally { compacting = false }
     if (e.trigger === 'precompute') return result
     if (result.skip !== undefined) {
       // Vetoed: nothing was installed, so drop the entry PreCompact may have opened.
@@ -583,9 +605,26 @@ export function register(on, options) {
     }
 
     const pend = await read($, pending)
-    const entry = row({ startedAt: new Date(t0).toISOString(), ...(pend || {}), ...numbers, ...mod })
-    await update($, compactions, (l) => [...l, entry])
-    await update($, pending, () => null)
+    if (pend) {
+      const entry = row({ startedAt: new Date(t0).toISOString(), ...pend, ...numbers, ...mod })
+      await update($, compactions, (l) => [...l, entry])
+      await update($, pending, () => null)
+      return out
+    }
+    // No pending entry: the SessionStart hooks ran inside next(e) and the fold has already
+    // closed it into a row with the ✓ marks and no numbers (the live order of 2026-10-17; the
+    // pane showed "? → ? tokens" and a second row held the numbers). classic.SessionStart
+    // noted that row's id in `held`: the numbers go on it, and the transcript line it held
+    // back goes out. Without a noted row (a reload mid-compaction), the numbers get a row of their own.
+    const list = await read($, compactions)
+    const i = held ? list.findIndex((c) => c.id === held) : -1
+    held = null
+    if (i >= 0) {
+      await update($, compactions, (l) => l.map((c, k) => (k === i ? { ...c, ...numbers, ...mod } : c)))
+      logRow($, (await read($, compactions))[i])
+    } else {
+      await update($, compactions, (l) => [...l, row({ startedAt: new Date(t0).toISOString(), ...numbers, ...mod })])
+    }
     return out
   }).catch(async ($, e, next) => {
     // The hook threw or timed out. Record it where the pane shows it and let the
@@ -640,7 +679,10 @@ export function register(on, options) {
           ? `Compaction done — the mod appended ${last.modAppended} of your turns after the summary`
           : 'Compaction done — nothing was re-injected'
       $.ui.toast(t)
-      $.ui.log(`compaction: ${fmtK(last.beforeTokens)} → ${fmtK(last.afterTokens)} tokens, ${last.beforeMessages ?? '?'} → ${last.afterMessages ?? '?'} messages in ${fmtSecs(last.durationMs)}; ${last.injected ? 'bundle re-injected' : last.modAppended != null ? `mod appended ${last.modAppended} turns` : 'no bundle'}`)
+      // With session.compact's next(e) still running, the numbers are not in yet: that hook
+      // writes the line once they are. Otherwise (the numbers are in, or never came) write it now.
+      if (last.beforeTokens != null || !compacting) logRow($, last)
+      else held = last.id
     }
     $.ui.invalidate('ui.render')
     return r

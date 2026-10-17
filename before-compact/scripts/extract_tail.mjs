@@ -59,7 +59,7 @@
 // latest, and ends with a stats line (turn counts + estimated token cost +
 // resolved source path).
 
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -180,16 +180,18 @@ function pointerLine(arc) {
 // so the user can SEE that recovery ran. Lives under ~/.claude/before-compact/, a path
 // both the script and the mod can compute without sharing environment.
 function statusPath(sessionId) {
-  return join(homedir(), '.claude', 'before-compact', `status-${sessionId || 'unknown'}.json`);
+  return join(homedir(), '.claude', 'before-compact', `status-${sessionId || 'unknown'}.jsonl`);
 }
+// One JSON record per line, appended. The user-side and assistant-side hooks of one event
+// run at the same moment and, with a ready bundle, finish within milliseconds of each other;
+// the earlier read-modify-write of a JSON array lost one of their records in a live
+// compaction (2026-10-17) and, in test/run.sh's concurrent pairs, left the file unparseable
+// as often. A short append is one write call, so neither process overwrites the other.
 function recordStatus(sessionId, entry) {
   try {
     const p = statusPath(sessionId);
     mkdirSync(join(p, '..'), { recursive: true });
-    let log = [];
-    try { log = JSON.parse(readFileSync(p, 'utf8')); if (!Array.isArray(log)) log = []; } catch { /* new */ }
-    log.push({ at: new Date().toISOString(), ...entry });
-    writeFileSync(p, JSON.stringify(log.slice(-50), null, 1));
+    appendFileSync(p, JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
   } catch { /* status is best-effort; never fail the hook over it */ }
 }
 

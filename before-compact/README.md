@@ -465,9 +465,10 @@ the mod with `--probe` (at session start, on Refresh, and after a compaction) an
   states the newest one's path, turn count and token figure, and the model reads the file
   only if it decides the task needs it. Its turn count, size and token figure (the ones
   on the file's own stats line) are in the status record, so the pane can show them.
-- `~/.claude/before-compact/status-<session id>.json`: one small record per hook run
-  (times, counts, paths; `side` says which side wrote it), at most 50 entries. The mod
-  reads it; nothing else does.
+- `~/.claude/before-compact/status-<session id>.jsonl`: one small record per hook run
+  (times, counts, paths; `side` says which side wrote it), one JSON line each, appended
+  and never rewritten, so the two hooks of one event cannot lose each other's record. The
+  mod reads it; nothing else does.
 - `~/.claude/before-compact/injected-<session id>.json`, only with the `inject_in_mod`
   experiment on: a one-line marker the mod writes before each compaction and both sides of
   the script read; the script deletes it only once it is older than two minutes.
