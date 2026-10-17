@@ -114,7 +114,7 @@ M="$HOME/.claude/before-compact/injected-t.json"
 printf '{"at":"%s","trigger":"manual","appended":5,"chars":1200}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$M"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [ -z "$out" ] || fail "SessionStart injected although the mod's marker said it had appended the turns"
-[ -e "$M" ] && fail "the stand-down marker was not consumed"
+[ -e "$M" ] || fail "the stand-down marker was deleted: it is read, not consumed, so the assistant-side hook can read it too"
 grep -q '"mod_appended": 5' "$HOME/.claude/before-compact/status-t.json" || fail "the stand-down was not recorded in the status file"
 # A stale marker (older than 2 minutes) is ignored and removed: the script injects as usual.
 printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":1200}' > "$M"
