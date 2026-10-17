@@ -18,7 +18,9 @@
 //      A turn too long for what is left of the budget is not the end of the walk: it
 //      becomes a one-line note in its place, and the older turns behind it still get
 //      their turn. Before 0.3.2 one oversized message (an agent's hand-back of 10,545
-//      characters, live) ended the walk and dropped every older turn.
+//      characters, live) ended the walk and dropped every older turn. Since 0.3.3 the
+//      budget the walk leaves unspent goes to the leads of the noted turns, newest first
+//      (at least 300 characters each, or the note stays).
 //
 //   2. As a Claude Code hook (--hook): reads the hook's JSON from stdin.
 //        PreCompact    → writes the recovery bundle to a file BEFORE the window is
@@ -149,6 +151,7 @@ const BUNDLE_MAX_AGE_MS = 15 * 60 * 1000; // a PreCompact bundle older than this
 // the pointer line and the stats line are fixed text around the turns; reserve
 // room for them so the total stays under --max-chars.
 const HOOK_RESERVE = 800;
+const MIN_LEAD = 300; // the leftover pass gives a noted turn its lead only when at least this many chars of it fit
 
 // Write one extraction to a file, with its stats line last. Returns the number of
 // characters written, or null if it failed.
@@ -492,13 +495,32 @@ function extract(T, o = {}) {
       if (note.length + 40 > budget) { stopped = true; break; }
       budget -= note.length + 40;
       noted++;
-      collected.push({ role: who, txt: note, noted: true });
+      collected.push({ role: who, txt: note, noted: true, src: txt });
       if (who === 'ASSISTANT') assistants++;
       continue;
     }
     budget -= cost;
     collected.push({ role: who, txt });
     if (who === 'ASSISTANT') assistants++;
+  }
+  // The leftover pass: whatever budget the walk did not spend goes to the leads of the
+  // noted turns, newest first, each cut to what fits (at least MIN_LEAD chars of it, or the
+  // note stays). A long opening message keeps its first paragraphs instead of only its size,
+  // and the turns kept by the walk are untouched.
+  let leads = 0;
+  if (isFinite(budget)) {
+    for (const c of collected) {
+      if (budget <= 300) break;
+      if (!c.noted) continue;
+      // The note's own chars come back; 300 stay unspent, because the stats and pointer
+      // lines grow with the transcript's path and the walk now fills the budget routinely.
+      const room = budget - 300 + c.txt.length;
+      const lead = truncate(c.src, room - 100);             // 100: room for the truncation marker
+      if (room - 100 < MIN_LEAD || lead.length > room) continue;
+      budget = room + 300 - lead.length;                    // the 300 stay reserved once, not per lead
+      c.txt = lead; c.noted = false; c.lead = true;
+      noted--; leads++;
+    }
   }
   collected.reverse(); // oldest -> newest
 
@@ -508,6 +530,7 @@ function extract(T, o = {}) {
   const chars = kept.reduce((s, c) => s + c.txt.length, 0);
   const users = kept.filter((c) => c.role === 'USER').length;
   const budgetBits = [
+    leads ? `${leads} turn(s) too long for their place given their lead from the budget left at the end` : '',
     noted ? `${noted} turn(s) over the remaining budget left out, each with a one-line note in its place` : '',
     stopped ? `kept the newest ${kept.length}; older turns dropped` : '',
   ].filter(Boolean).join('; ');
@@ -516,7 +539,7 @@ function extract(T, o = {}) {
     `  ·  ~${Math.round(chars / 4)} tokens  ·  source: ${T}]` +
     (RECOVER ? `\n[recover: ${recoverNote}]` : '') +
     (isFinite(maxChars) && budgetBits ? `\n[budget: --max-chars ${maxChars}${reserve ? ` (${reserve} reserved for the framing)` : ''}: ${budgetBits}]` : '');
-  return { body, stats, count: kept.length, noted, tokens: Math.round(chars / 4), epoch };
+  return { body, stats, count: kept.length, noted, leads, tokens: Math.round(chars / 4), epoch };
 }
 
 // ---- probe mode: what does the transcript say about past compactions? ------
@@ -589,6 +612,7 @@ if (HOOK) {
       Object.assign(rec, { min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null, newest_turns: NEWEST_TURNS, newest_max: NEWEST_MAX });
     }
     rec.noted = out.noted;
+    rec.leads = out.leads;
     recordStatus(hook.session_id, rec);
     process.exit(0);
   }

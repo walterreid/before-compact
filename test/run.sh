@@ -334,16 +334,27 @@ RB="$W/data/precompact-relay.txt"
 for t in "OLDEST own turn A" "own turn B" "Typed after the context" "NEWEST own turn C"; do
   grep -q "$t" "$RB" || fail "user side: the user's own text '$t' is missing"
 done
-for t in "Another Claude session" "agent-message" "RRRR" "relayed note" "scheduled prompt" "side-sessions-event" "context block" "PPPP"; do
+for t in "Another Claude session" "agent-message" "RRRR" "relayed note" "scheduled prompt" "side-sessions-event" "context block"; do
   grep -q "$t" "$RB" && fail "user side: '$t' should have been left out"
 done
-grep -q "(12000 chars, over the remaining budget, so left out here; the transcript has it whole)" "$RB" || fail "the over-budget paste has no note in its place"
-order=$(grep -o 'OLDEST own turn A\|own turn B\|Typed after the context\|12000 chars, over\|NEWEST own turn C' "$RB" | tr '\n' '|')
-[ "$order" = "OLDEST own turn A|own turn B|Typed after the context|12000 chars, over|NEWEST own turn C|" ] || fail "user side order is wrong: $order"
-grep -q '^\[4 turns (4 user / 0 assistant)' "$RB" || fail "the stats line should count the 4 kept turns, not the note"
-grep -q '1 turn(s) over the remaining budget left out, each with a one-line note in its place' "$RB" || fail "the budget line does not report the note"
+# The paste is over the budget in the walk; the leftover pass gives it its lead (0.3.3).
+grep -q "PASTE-START PPPP" "$RB" || fail "the over-budget paste did not get its lead from the leftover budget"
+grep -q "over the remaining budget, so left out here" "$RB" && fail "the paste kept its note although the leftover budget had room for its lead"
+grep -q "chars truncated" "$RB" || fail "the paste's lead carries no truncation marker"
+n=$(echo '{"session_id":"relay","transcript_path":"'"$W/relay.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000 | python3 -c 'import sys; print(len(sys.stdin.read()))')
+[ "$n" -le 9000 ] || fail "the user SessionStart output is $n chars after the leftover pass, over the 9,000 budget"
+order=$(grep -o 'OLDEST own turn A\|own turn B\|Typed after the context\|PASTE-START\|NEWEST own turn C' "$RB" | tr '\n' '|')
+[ "$order" = "OLDEST own turn A|own turn B|Typed after the context|PASTE-START|NEWEST own turn C|" ] || fail "user side order is wrong: $order"
+grep -q '^\[5 turns (5 user / 0 assistant)' "$RB" || fail "the stats line should count the 4 kept turns and the paste's lead"
+grep -q '1 turn(s) too long for their place given their lead from the budget left at the end' "$RB" || fail "the budget line does not report the lead"
+# With a small budget there is no room for a lead of 300 chars: the note stays.
+small=$(node "$S" --file "$W/relay.jsonl" --role user --max-chars 500)
+grep -q "(12012 chars, over the remaining budget, so left out here; the transcript has it whole)" <<<"$small" || fail "with a small budget the paste should keep its note"
+grep -q "PASTE-START" <<<"$small" && fail "with a small budget the paste should get no lead"
+grep -q "OLDEST own turn A" <<<"$small" || fail "with a small budget the older turns should still come back"
+grep -q '1 turn(s) over the remaining budget left out, each with a one-line note in its place' <<<"$small" || fail "the budget line does not report the note"
 grep -q "older turns dropped" "$RB" && fail "nothing was dropped, but the budget line says so"
-python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][-1]; assert r["turns"]==4 and r["noted"]==1, r' "$HOME/.claude/before-compact/status-relay.jsonl" || fail "the relay status record should say 4 turns and 1 note"
+python3 -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x["event"]=="PreCompact"][-1]; assert r["turns"]==5 and r["noted"]==0 and r["leads"]==1, r' "$HOME/.claude/before-compact/status-relay.jsonl" || fail "the relay status record should say 5 turns, no note, 1 lead"
 grep -q "Another Claude session" "$W/data/arc-relay-1.txt" || fail "the arc should keep relayed messages: it is the full record"
 
 # The newest two assistant turns up to 4,000 chars, older ones at 1,500.
