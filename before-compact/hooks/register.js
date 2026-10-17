@@ -12,6 +12,8 @@
 //   • a third tab showing the summary the engine installed, with the token counts
 //     before and after and the size of the arc file on disk beside them, so a
 //     person can compare what the summary kept against what it cost
+//   • a Digest tab (4) showing the digest the digest
+//     experiment wrote before the last compaction, with its model and size
 //
 // Where each number comes from:
 //   session.compact        the event the engine fires around a compaction. After
@@ -335,6 +337,20 @@ async function loadBundle($, path) {
   } catch (e) { bundleText = ''; lastError = 'bundle: ' + msg(e) }
 }
 
+// The digest file the mod wrote before the last compaction (writeDigest), read
+// back for the Digest tab: at session start, on Refresh and after a compaction,
+// so a reload of this module does not empty the tab.
+async function loadDigest($) {
+  try {
+    const home = await $.env.get('HOME')
+    const id = await $.session.id()
+    const p = digestPath(home, id)
+    if (!(await $.fs.exists(p))) { digest = null; return }
+    const d = JSON.parse(await $.fs.read(p))
+    digest = d && typeof d.text === 'string' ? d : null
+  } catch (e) { digest = null; lastError = 'digest file: ' + msg(e) }
+}
+
 // A full row with every field present (null = not known), so the pane and the
 // tests see one shape whichever hook filled it in.
 function row(fields) {
@@ -345,7 +361,7 @@ function row(fields) {
     postAt: null, injected: null, injectedTokens: null, origin: null,
     modAppended: null, modChars: null,
     summary: null, arc: null, arcTurns: null, arcChars: null, arcTokens: null,
-    digest: null,
+    digest: null, digestInjected: null,
     ...fields,
     ...(fields.id ? {} : { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }),
   }
@@ -390,6 +406,8 @@ function fold(log, list, pend) {
       // The mod's own row already says what it appended; the script's record only
       // confirms it (a stood-down record carries the count it read from the marker).
       if (rec.mod_appended != null) Object.assign(done, { modAppended: rec.mod_appended, modChars: rec.mod_chars ?? null })
+      // How many chars of the digest the script printed ahead of the turns (0: none was fresh).
+      if (rec.digest_chars != null) done.digestInjected = rec.digest_chars
       const i = newestOpen(list, 'postAt')
       if (i >= 0) {
         list = list.map((c, k) => (k === i ? { ...c, ...done, bundle: c.bundle || rec.bundle || null } : c))
@@ -434,6 +452,7 @@ export function register(on, options) {
     await refreshLive($)
     await syncStatus($)
     await probeTranscript($)
+    await loadDigest($)
     $.clock.every(2000, async () => {
       await refreshLive($)
       $.ui.invalidate('ui.render')
@@ -560,6 +579,7 @@ export function register(on, options) {
     if (last && last.postAt != null && !(was && was.postAt === last.postAt)) {
       await loadBundle($, last.bundle)
       await probeTranscript($)
+      await loadDigest($)
       const t = last.injected
         ? `Restored ${fmtK(last.injectedTokens)} tokens of your voice`
         : last.modAppended != null
@@ -594,7 +614,8 @@ export function register(on, options) {
         tabButton('monitor', 'Monitor', '1'),
         tabButton('bundle', 'Last bundle', '2'),
         tabButton('summary', 'Summary', '3'),
-        Button({ key: 'refresh', label: 'Refresh', hotkey: 'r', plain: true, onPress: async () => { await refreshLive($); await syncStatus($); await probeTranscript($); const l = (await read($, compactions)); const last = l[l.length - 1]; if (last) await loadBundle($, last.bundle); redraw() } }),
+        tabButton('digest', 'Digest', '4'),
+        Button({ key: 'refresh', label: 'Refresh', hotkey: 'r', plain: true, onPress: async () => { await refreshLive($); await syncStatus($); await probeTranscript($); await loadDigest($); const l = (await read($, compactions)); const last = l[l.length - 1]; if (last) await loadBundle($, last.bundle); redraw() } }),
       ],
     })
 
@@ -617,6 +638,31 @@ export function register(on, options) {
           c.summary
             ? Text({ wrap: 'wrap', children: [c.summary] })
             : Text({ dimColor: true, children: ['(the result\'s first message had no text)'] }),
+        ]
+      }
+    } else if (tab === 'digest') {
+      // The last row's engine figures, so the digest can be read against what the
+      // compaction did (the Summary tab, hotkey 3, shows the summary itself and the arc).
+      const last = list.length ? list[list.length - 1] : null
+      const sumChars = last && last.summary ? last.summary.length : 0
+      const figures = last
+        ? `Last compaction: ${fmtK(last.beforeTokens)} → ${fmtK(last.afterTokens)} tokens, ${last.beforeMessages ?? '?'} → ${last.afterMessages ?? '?'} messages; the engine's summary ${fmtK(sumChars)} chars (tab 3)${last.arcChars != null ? `, the arc on disk ${fmtK(last.arcChars)} chars` : ''}${last.digestInjected != null ? `; the SessionStart hook printed ${last.digestInjected ? `${last.digestInjected} chars of the digest` : 'no digest'} ahead of your turns` : ''}`
+        : 'No compaction watched this session yet.'
+      if (digest) {
+        const text = digest.text.length > 9500 ? digest.text.slice(0, 9500) + '\n…[truncated for the pane]' : digest.text
+        body = [
+          Text({ bold: true, children: [`Digest written by ${digest.model || '?'} at ${fmtTime(digest.at)}: ${digest.chars ?? digest.text.length} chars from the last ${digest.turns ?? '?'} turns (~${fmtK(digest.inputChars)} chars in${digest.durationMs != null ? `, ${fmtSecs(digest.durationMs)}` : ''}${digest.usage ? `, ${fmtK((digest.usage.input_tokens || 0) + (digest.usage.cache_read_input_tokens || 0) + (digest.usage.cache_creation_input_tokens || 0))} tokens in / ${fmtK(digest.usage.output_tokens)} out` : ''})`] }),
+          Text({ dimColor: true, children: [figures] }),
+          Text({ dimColor: true, children: ['A model\'s digest of the dialog, written before the compaction (digest_in_precompact). It is a summary too: read it against tab 3 and the README\'s comparison protocol before trusting it.'] }),
+          Text({ children: [' '] }),
+          Text({ wrap: 'wrap', children: [text] }),
+        ]
+      } else {
+        body = [
+          Text({ dimColor: true, children: [settings.digest_in_precompact
+            ? `No digest for this session yet. The next compaction writes one (${settings.digest_model}, up to ${settings.digest_max_tokens} tokens); run /compact to try it.`
+            : 'The digest experiment is off (userConfig digest_in_precompact). With it on, the mod asks a model for a digest of the dialog before each compaction and shows it here.'] }),
+          Text({ dimColor: true, children: [figures] }),
         ]
       }
     } else if (tab === 'bundle') {
@@ -666,6 +712,9 @@ export function register(on, options) {
         rows.push(Text({ color: c.saved ? 'green' : c.saved === false ? 'red' : 'yellow', children: [`    PreCompact  ${c.saved ? '✓' : c.saved === false ? '✗' : '?'} ${c.saved ? `saved ${c.savedTurns} user turns (~${fmtK(c.savedTokens)} tokens)` : c.saved === false ? 'bundle not written' : 'no status record (press r)'}`] }))
         rows.push(Text({ color: c.injected ? 'green' : c.injected === false ? (c.modAppended != null ? 'green' : 'red') : 'yellow', children: [`    SessionStart ${c.injected ? '✓' : c.injected === false ? (c.modAppended != null ? '–' : '✗') : '?'} ${c.injected ? `re-injected ~${fmtK(c.injectedTokens)} tokens (${c.origin || ''})` : c.injected === false ? (c.modAppended != null ? `stood down (${c.origin || ''})` : 'nothing injected') : 'no status record (press r)'}`] }))
         if (c.modAppended != null) rows.push(Text({ color: c.injected ? 'yellow' : 'green', children: [`    Mod          ✓ appended ${c.modAppended} user turns (~${fmtK(c.modChars)} chars) after the summary${c.injected ? ' — and the script injected too: the stand-down marker was missed' : ''}`] }))
+        if (c.digest) rows.push(Text({ color: c.digest.error ? 'red' : 'green', children: [c.digest.error
+          ? `    Digest       ✗ ${c.digest.model}: ${c.digest.error}`
+          : `    Digest       ✓ ${c.digest.model} wrote ${c.digest.chars} chars from ${c.digest.turns} turns in ${fmtSecs(c.digest.durationMs)}${c.digestInjected != null ? (c.digestInjected ? `; ${c.digestInjected} chars injected (tab 4)` : '; not injected: the script found no fresh digest') : ''}`] }))
       })
       if (!pend && !list.length) {
         rows.push(Text({ dimColor: true, children: ['No compactions yet this session.'] }))

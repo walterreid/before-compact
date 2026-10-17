@@ -49,6 +49,8 @@ export type Compaction = {
   arcTokens: number | null
   /** The digest experiment (digest_in_precompact): what the mod wrote before this compaction, or null. `error` set when nothing was written. */
   digest: { model: string; chars: number | null; turns: number | null; durationMs: number | null; error?: string } | null
+  /** From the script's SessionStart(compact) record: how many chars of the digest it printed ahead of the turns (0: none was fresh). */
+  digestInjected: number | null
 }
 
 /** The compaction in flight: opened by classic.PreCompact, completed by session.compact. */
