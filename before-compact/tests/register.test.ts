@@ -49,18 +49,20 @@ const transcript = (n: number) =>
 
 const SUMMARY = { role: 'user', text: 'This session is being continued from a previous conversation. Summary.', toolUses: [] } as const
 
-// The stubs every test needs; `status` is what the status file holds right now.
-function stubs($: any, on: any, status: { log: unknown[] }) {
+// The stubs every test needs; `status` is what the status file holds right now,
+// `files` what the mod has written through $.fs.write (the digest tests read it back),
+// `messages` what $.session.messages() returns (the digest tests hand it a dialog).
+function stubs($: any, on: any, status: { log: unknown[] }, files: Record<string, string> = {}, messages: readonly unknown[] = []) {
   mock.clock(on)
   mock.env(on, { HOME })
   on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 82000, window: 200000, percent: 41 }, rateLimits: [], cost: 0 } }))
-  on('session.messages', () => ({ value: [] }))
+  on('session.messages', () => ({ value: messages }))
   on('session.id', () => ({ value: SESSION }))
   on('session.cwd', () => ({ value: '/work' }))
   // Filesystem: the status file (when it has records) and the bundle exist; nothing
   // else does, so findTranscript returns null and --probe is never run.
-  on('fs.exists', ($: any, e: any) => ({ value: (e.path === STATUS && status.log.length > 0) || e.path === BUNDLE }))
-  on('fs.read', ($: any, e: any) => ({ value: e.path === STATUS ? JSON.stringify(status.log) : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : '' }))
+  on('fs.exists', ($: any, e: any) => ({ value: (e.path === STATUS && status.log.length > 0) || e.path === BUNDLE || files[e.path] != null }))
+  on('fs.read', ($: any, e: any) => ({ value: e.path === STATUS ? JSON.stringify(status.log) : e.path === BUNDLE ? 'LAST BEFORE COMPACTION' : files[e.path] ?? '' }))
   on('process.run', () => ({ deny: 'process.run must not be called when no transcript was found' }))
   const toasts: string[] = []
   const logs: string[] = []
@@ -527,5 +529,134 @@ test('a failed --probe shows the useful error line, not node\'s loader preamble'
   // And the transcript line must not claim the transcript is missing when the probe is what failed.
   expect(await ui.find({ type: 'Text', text: /Transcript on disk: not found/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Transcript on disk: .*probe failed/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// --- the digest experiment (userConfig digest_in_precompact) ----------------------
+// The kit seeds the flag through test(name, { options }, body). What these prove: with
+// the flag off no model call and no write; with it on, one $.model.complete call whose
+// system prompt carries the five headings in order, the file, the row's line and the
+// Digest tab; a refused call writes nothing and the compaction goes on. What they cannot
+// prove: that a real model writes a useful digest (the README's comparison protocol).
+
+const DIGEST_FILE = `${HOME}/.claude/before-compact/digest-${SESSION}.json`
+const DIALOG = [
+  { role: 'user', text: 'Always use haiku for this. <system-reminder>noise</system-reminder>', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ id: 'x', name: 'Bash', input: {} }] },                 // a tool call only
+  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'x', text: 'ok', isError: false, result: null }] }, // a tool result only
+  { role: 'user', text: 'This session is being continued from a previous conversation. Summary.', toolUses: [] },      // an earlier summary
+  { role: 'assistant', text: 'Done; nothing pushed.', toolUses: [] },
+] as const
+const DIGEST_TEXT = '## Constraints and preferences\n- "Always use haiku for this."\n\n## Decisions\nnone\n\n## Corrections\nnone\n\n## Verified vs assumed\nnone\n\n## Open threads\nnone'
+const USAGE = { input_tokens: 300, output_tokens: 40, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+
+test('digest_in_precompact off (the default): no model call, no write, no error', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  on('model.complete', () => ({ deny: 'no model call may be made while the flag is off' }))
+  on('fs.write', () => ({ deny: 'nothing may be written while the flag is off' }))
+  on('session.compact', () => ({ messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 }))
+
+  status.log = [PRE]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  await $.session.compact({ trigger: 'manual', messages: transcript(10) } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}50k → 4k tokens/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Digest {7}/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.press({ key: 'tab-digest' })
+  expect(await ui.find({ type: 'Text', text: /^The digest experiment is off/ })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
+
+test('digest_in_precompact on: one model call with the headings in order, the file, the row and the tab', { options: { digest_in_precompact: true, digest_model: 'haiku', digest_max_tokens: 1500 } }, async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const files: Record<string, string> = {}
+  const { toasts } = stubs($, on, status, files, DIALOG)
+  const calls: any[] = []
+  on('model.complete', ($: any, e: any) => { calls.push(e); return { value: { isAnswered: true, text: DIGEST_TEXT, usage: USAGE } } })
+  on('fs.write', ($: any, e: any) => { files[e.path] = e.text; return { value: undefined } })
+  on('session.compact', () => ({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  status.log = [PRE]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  expect(toasts).toEqual(['Compaction starting — saving your last turns', 'Writing a digest of the dialog (haiku)…'])
+
+  // One call, the knobs as given, the dialog as text with only the two turns that say something.
+  expect(calls.length).toBe(1)
+  const call = calls[0]
+  expect(call.model).toBe('haiku')
+  expect(call.maxTokens).toBe(1500)
+  expect(call.prompt).toBe('The dialog, oldest to newest:\n\nUSER:\nAlways use haiku for this.\n\nASSISTANT:\nDone; nothing pushed.')
+  // The system prompt asks for the five headings in this order, the latest state of each decision, and quotes.
+  const headings = ['## Constraints and preferences', '## Decisions', '## Corrections', '## Verified vs assumed', '## Open threads']
+  const at = headings.map((h) => call.system.indexOf(h))
+  expect(at.every((i) => i >= 0)).toBe(true)
+  expect(at).toEqual([...at].sort((a, b) => a - b))
+  expect(call.system).toMatch(/Prefer the latest state of each decision over earlier ones/)
+  expect(call.system).toMatch(/quote the user rather than paraphrase/)
+
+  // The file, before the hook returned.
+  expect(Object.keys(files)).toEqual([DIGEST_FILE])
+  const written = JSON.parse(files[DIGEST_FILE])
+  expect(written).toEqual({ at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), trigger: 'manual', model: 'haiku', chars: DIGEST_TEXT.length, turns: 2,
+    inputChars: call.prompt.length, durationMs: expect.any(Number), usage: USAGE, text: DIGEST_TEXT })
+
+  // The row carries it once session.compact has made the row.
+  await $.session.compact({ trigger: 'manual', messages: transcript(143) } as any)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}Digest {7}✓ haiku wrote ${DIGEST_TEXT.length} chars from 2 turns in \\d+\\.\\d s$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+
+  // The Digest tab shows the text under its model and size, with the row's figures.
+  await ui.press({ key: 'tab-digest' })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^Digest written by haiku at \\d\\d:\\d\\d: ${DIGEST_TEXT.length} chars from the last 2 turns`) })).toBeDefined()
+  // Beside the Summary tab's figures: the summary's size (the result's first message) and the arc's when the record has it.
+  expect(await ui.find({ type: 'Text', text: /^Last compaction: 82k → 19k tokens, 143 → 7 messages; the engine's summary \d+ chars \(tab 3\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: DIGEST_TEXT })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+
+  // The script's record says how much of the digest it printed; the row and the tab show it.
+  status.log = [PRE, { ...POST, digest_chars: 1234, digest_model: 'haiku', digest_turns: 2, digest_dropped_turns: 0 }]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Digest {7}✓ haiku wrote \d+ chars from 2 turns in \d+\.\d s; 1234 chars injected \(tab 4\)$/ })).toBeDefined()
+  await ui.press({ key: 'tab-digest' })
+  expect(await ui.find({ type: 'Text', text: /^Last compaction: .*; the SessionStart hook printed 1234 chars of the digest ahead of your turns$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: DIGEST_TEXT })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
+
+test('digest_in_precompact on, the call refused or unanswered: nothing written, the error shown, the compaction goes on', { options: { digest_in_precompact: true } }, async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status, {}, DIALOG)
+  let answer: any = { deny: 'model blocked' }
+  on('model.complete', () => answer)
+  on('fs.write', () => ({ deny: 'nothing may be written when the model did not answer' }))
+  on('session.compact', () => ({ messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 }))
+
+  // A refused request rejects the call: caught, nothing written.
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'auto' })
+  await $.session.compact({ trigger: 'auto', messages: transcript(10) } as any)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}auto {3}50k → 4k tokens/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}Digest {7}✗ haiku: digest: .*model blocked/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\(last error: digest: .*model blocked/ })).toBeDefined()
+  await ui.unmount()
+
+  // An unanswered one (timed out, an API error) resolves with a reason: the same, with the reason.
+  answer = { value: { isAnswered: false, reason: 'aborted', usage: USAGE } }
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'auto' })
+  await $.session.compact({ trigger: 'auto', messages: transcript(10) } as any)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 2$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}Digest {7}✗ haiku: digest: no answer \(aborted\)$/ })).toBeDefined()
+  await ui.press({ key: 'tab-digest' })
+  expect(await ui.find({ type: 'Text', text: /^No digest for this session yet/ })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
   await ui.unmount()
 })
