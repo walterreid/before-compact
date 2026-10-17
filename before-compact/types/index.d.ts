@@ -34,6 +34,19 @@ export type Compaction = {
   /** Phase 2: how many user turns the mod itself appended after the summary (inject_in_mod). */
   modAppended: number | null
   modChars: number | null
+  /**
+   * The summary the engine installed: the text of the first message in the
+   * session.compact result, capped at 9,500 chars for the pane's Summary tab.
+   */
+  summary: string | null
+  /**
+   * The arc file the script wrote beside the bundle for this compaction's window
+   * (path, turns, size, the file's own token figure), from its PreCompact record.
+   */
+  arc: string | null
+  arcTurns: number | null
+  arcChars: number | null
+  arcTokens: number | null
 }
 
 /** The compaction in flight: opened by classic.PreCompact, completed by session.compact. */
