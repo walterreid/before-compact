@@ -532,6 +532,78 @@ test('a failed --probe shows the useful error line, not node\'s loader preamble'
   await ui.unmount()
 })
 
+// --- the assistant side (the second hook of each event, --side assistant) ---------
+// What these prove: a side: "assistant" record lands on the same row as the user
+// side's and draws the row's second SessionStart line, with its ✓, ?, – and ✗
+// states, while the user line is unchanged. What they cannot prove: that a live
+// Claude Code hands the model both hook outputs, or in which order.
+
+const BUNDLE_A = '/data/precompact-sess1-assistant.txt'
+const PRE_A = { at: '2026-10-16T14:58:00.500Z', event: 'PreCompact', side: 'assistant', trigger: 'manual', written: true, bundle: BUNDLE_A,
+  turns: 7, chars: 7200, tokens_est: 1800, min_chars: 200, assistant_max: 1500, transcript: '/x.jsonl' }
+const POST_A = { at: '2026-10-16T14:58:05.500Z', event: 'SessionStart', side: 'assistant', source: 'compact', origin: 'prepared by the PreCompact hook',
+  chars: 7600, tokens_est: 1900, bundle: BUNDLE_A, transcript: '/x.jsonl', injected: true, min_chars: 200, assistant_max: 1500 }
+
+test('the assistant side: both SessionStart records draw both lines on one row, and the toast carries both figures', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  const { toasts, logs } = stubs($, on, status)
+  on('session.compact', () => ({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  // Both PreCompact records are on disk when the mod's classic.PreCompact next(e) resolves.
+  status.log = [PRE, PRE_A]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  await $.session.compact({ trigger: 'manual', messages: transcript(143) } as any)
+
+  // One row; the assistant line says no record yet, in its own words, beside the user line's.
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart \? no status record \(press r\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart \? no status record for the assistant's turns \(press r\)$/ })).toBeDefined()
+  await ui.unmount()
+
+  // Both SessionStart records: two ✓ lines, the user's unchanged, the assistant's with its own figure.
+  status.log = [PRE, PRE_A, POST, POST_A]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+  expect(toasts).toEqual(['Compaction starting — saving your last turns', 'Restored 1k tokens of your voice and 2k of the assistant\'s turns'])
+  expect(logs.length).toBe(1)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}PreCompact {2}✓ saved 32 user turns \(~1k tokens\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart ✓ re-injected ~1k tokens \(prepared by the PreCompact hook\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart ✓ re-injected ~2k tokens of the assistant's turns \(prepared by the PreCompact hook\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart \?/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^#2 / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  // Re-reading the same records adds nothing.
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the assistant side off, stood down, or with nothing to inject: a dash, a dash, a ✗; the user line unchanged', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  // Three compactions seen through their records alone (no session.compact fired into the mod).
+  const at = (n: number, side: string) => `2026-10-16T15:0${n}:0${side === 'assistant' ? 5 : 0}.000Z`
+  status.log = [
+    { ...POST, at: at(1, 'user') }, { ...POST_A, at: at(1, 'assistant'), injected: false, origin: 'off: the assistant_turns option is false' },
+    { ...POST, at: at(2, 'user') }, { ...POST_A, at: at(2, 'assistant'), injected: false, origin: 'stood down: the mod appended 3 user turns after the summary', mod_appended: 3, mod_chars: 18 },
+    { ...POST, at: at(3, 'user') }, { ...POST_A, at: at(3, 'assistant'), injected: false, origin: 'nothing to inject: no turns found in the transcript' },
+  ]
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 3$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart – assistant's turns off \(assistant_turns\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart – assistant's turns stood down \(stood down: the mod appended 3 user turns after the summary\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart ✗ nothing of the assistant's turns injected \(nothing to inject: no turns found in the transcript\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart \? no status record for the assistant's turns/ })).toBeUndefined()
+  // The user line on each row is the ✓ it always was.
+  expect(await ui.find({ type: 'Text', text: /^ {4}SessionStart ✓ re-injected ~1k tokens \(prepared by the PreCompact hook\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SessionStart [✗?] (nothing injected|no status record \(press r\))/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 // --- the digest experiment (userConfig digest_in_precompact) ----------------------
 // The kit seeds the flag through test(name, { options }, body). What these prove: with
 // the flag off no model call and no write; with it on, one $.model.complete call whose

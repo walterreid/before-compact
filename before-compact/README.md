@@ -9,12 +9,14 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 
 | Component | When | What |
 | --- | --- | --- |
-| `hooks/hooks.json` → `PreCompact` | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
-| `hooks/hooks.json` → `SessionStart (compact)` | right after compaction | prints that bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One factual line after the framing states where the newest arc file is, with its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
+| `hooks/hooks.json` → `PreCompact`, first entry | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
+| `hooks/hooks.json` → `PreCompact`, second entry | the same moment | the same script with `--side assistant`: writes the assistant's last turns (assistant role, turns under 200 characters skipped, each cut after 1,500, ≤9000 chars) to `precompact-<session>-assistant.txt`. No arc. Skipped when `assistant_turns` is off (see *The assistant's turns*) |
+| `hooks/hooks.json` → `SessionStart (compact)`, first entry | right after compaction | prints the user bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One factual line after the framing states where the newest arc file is, with its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
+| `hooks/hooks.json` → `SessionStart (compact)`, second entry | the same moment | prints the assistant bundle (or extracts it live) as a block of its own, under its own factual framing, with no pointer line and no digest: a second hook output, under its own 10,000-character cap. Skipped when `assistant_turns` is off |
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
-| `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. Compaction boundaries are the transcript's `compact_boundary` entries (the phrase match is a fallback for older transcripts); `--probe` reports each boundary's engine numbers. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
+| `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--side`, `--min-chars`, `--max-chars` and `--probe`. Every manual flag still works. Compaction boundaries are the transcript's `compact_boundary` entries (the phrase match is a fallback for older transcripts); `--probe` reports each boundary's engine numbers. With `inject_in_mod` on both sides also honour the mod's stand-down marker (below) |
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the instructions the summarizer was given, how long the summary took, and the summary itself. On the way down, appends the `summary_instructions` text (by default the plugin's brief for the summarizer) to the instructions, after anything you typed (see *The brief*). With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
-| `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks. With `digest_in_precompact` on, `classic.PreCompact` also asks a model for a digest of the dialog and writes it to disk before the engine summarizes (see *Digest*) |
+| `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status records the script writes inside those hooks' `next(e)`, one per side: the ✓ marks, and the row's second `SessionStart` line for the assistant's turns. With `digest_in_precompact` on, `classic.PreCompact` also asks a model for a digest of the dialog and writes it to disk before the engine summarizes (see *Digest*) |
 | `hooks/brief.js` | every compaction | the default text of `summary_instructions`, the plugin's brief for the summarizer (see *The brief*) |
 | `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it, and a **Digest** tab beside it for the `digest_in_precompact` experiment. Toasts when a compaction starts and finishes |
 | `types/index.d.ts` | load time | declares the two `$.state` values (the log, with each row's summary text and arc size, and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
@@ -38,6 +40,11 @@ Type `/before-compact`. The pane shows:
         instructions: keep the plan
         PreCompact  ✓ saved 32 user turns (~1k tokens)
         SessionStart ✓ re-injected ~1k tokens (prepared by the PreCompact hook)
+        SessionStart ✓ re-injected ~2k tokens of the assistant's turns (prepared by the PreCompact hook)
+
+The second `SessionStart` line is the assistant side's hook (see *The assistant's turns*):
+`–` when it stood down or `assistant_turns` is off, `✗` when it printed nothing for another
+reason, `?` when no record arrived. The user line above it is the same as before.
 
 On a session that was compacted before the plugin was installed, "Compactions this session"
 stays 0 (the mod only logs compactions it watched), but the line under it reports the markers
@@ -60,8 +67,8 @@ The row's numbers are the engine's own: the `session.compact` event's result car
 `2.3 s` is how long the summary took. The gauge at the top is `$.session.usage()`, polled
 every 2 s. The ✓ marks come from a status record the script writes to
 `~/.claude/before-compact/` inside each settings hook; a `?` means no record arrived (press
-`r`). Two ✓ marks and a drop in the numbers is what "compaction is working" looks like.
-Press `2` for the exact text that went back into context, `3` for the summary the engine
+`r`). Three ✓ marks and a drop in the numbers is what "compaction is working" looks like.
+Press `2` for the exact text of your turns that went back into context, `3` for the summary the engine
 installed, `4` for the digest the `digest_in_precompact` experiment wrote. Esc closes the pane.
 
 Press `3` for the **Summary** tab: the summary the engine installed, verbatim (the first
@@ -132,6 +139,66 @@ The pane's rows show what you typed after `/compact` in full and the knob's text
 (`instructions: keep the plan + summary_instructions (554 chars; tab 3 shows it)`); the
 Summary tab shows the whole text the summarizer received.
 
+## The assistant's turns: `assistant_turns`
+
+On by default. A boolean in `/config` → *before-compact* → *assistant_turns*, or
+`pluginConfigs` in `~/.claude/settings.json`.
+
+**Why.** The baseline in [`test/live-protocol.md`](../test/live-protocol.md) found that
+neither the engine's summary nor the user bundle carries the assistant's side of the
+window: the summary compresses it into two sections, and the bundle is the user's turns
+only, because within one 10,000-character hook output every assistant turn displaces one of
+the user's. The arc file holds the assistant's turns, but only on demand. A second hook
+output gets round the displacement: the hooks reference says the cap is measured per
+string, "each string on its own, even when several hooks run for the same event", and that
+"when several hooks return additionalContext for the same event, Claude receives all of the
+values". So the assistant's turns go back as a block of their own, under their own cap,
+without taking a character from yours.
+
+**What it does.** `hooks/hooks.json` has two entries per event. The second runs the same
+script with `--side assistant --role assistant --assistant-max 1500 --min-chars 200
+--max-chars 9000`:
+
+- `PreCompact` writes `$CLAUDE_PLUGIN_DATA/precompact-<session>-assistant.txt`: the
+  assistant's last turns, newest first under 9,000 characters, each turn cut after its first
+  1,500 characters (the long ones lead with the conclusion, so the lead survives), turns
+  under 200 characters left out (one-line progress notes). No arc: the user side's entry
+  writes the one arc per compaction.
+- `SessionStart (compact)` prints that bundle under its own factual framing (*The following
+  are the assistant's own prior turns from this same session, from just before the context
+  was compacted…*), with no arc pointer line and no digest block (the user side's hook
+  prints both), and writes a status record with `side: "assistant"`. The same 15-minute
+  freshness rule and the same live fallback as the user side; the fallback writes no arc.
+- Both sides honour the `inject_in_mod` stand-down marker (see *The experiment*).
+
+Measured on the session that asked for this, against the 9,000-character budget: 7 full
+assistant turns (about 1,800 tokens), or 11 cut at 1,200 characters, or 17 cut at 700.
+Assistant turns there ran from one-line progress notes to about 4,800 characters. 1,500 and
+200 are the defaults in `hooks.json`; both are flags, so edit the entry to tune them.
+
+**Off.** The script reads the option from `CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS`, the
+variable the plugins reference says Claude Code exports to hook processes for every option
+(the key uppercased). With it `false` the two assistant-side hooks write nothing, print
+nothing, and record `injected: false` with the reason; the pane's second line shows `–`.
+The reference does not say whether the default is exported when you never set the option,
+or how a boolean is spelled, so the script treats an absent or empty variable as the
+default, on, and only an explicit `false`, `0`, `off` or `no` as off.
+
+**What is verified and what is not.** `test/run.sh` proves the second bundle is written
+with no second arc, that the assistant output starts with its framing, holds assistant turns
+and no user turn, no pointer line and no digest even when a fresh digest exists, skips the
+turns under 200 characters, stays under 9,000 characters, falls back to the transcript, and
+that with the option off nothing is printed and the record says why. `claude plugin test`
+proves the pane draws both lines from both records. **What a live `/compact` still has to
+prove: that both hook outputs reach the model, each under its own cap with no combined cap
+applied, and in which order.** The Summary tab cannot show that (it shows the engine's
+summary, not what the hooks added); asking the model can. After `/compact`, ask Claude what
+the first and last lines of the blocks of prior turns in its context say, and whether the
+block of the assistant's own turns comes before or after yours. If it quotes both framings,
+both outputs reached it; the order it reports is the order for that build; if it quotes only
+one, the cap or the merge is not what the reference describes. Nothing in the pane can tell
+these cases apart: the two ✓ marks say the hooks ran and printed, not what the model received.
+
 ## The experiment: `inject_in_mod`
 
 Off by default. Leave it off unless you want to test it.
@@ -155,18 +222,24 @@ With the flag on (`/config` → *before-compact* → *inject_in_mod*, or `plugin
 3. returns the result with one built framing message and those messages, handles intact,
    appended after the summary and the messages the engine kept.
 
-The SessionStart settings hook then **stands down**: the script reads the marker, deletes
-it, prints nothing, and writes a status record saying so (the pane shows `SessionStart –
-stood down` and a `Mod ✓ appended N user turns` line).
+The SessionStart settings hooks then **stand down**, both sides: each reads the marker,
+prints nothing, and writes a status record saying so (the pane shows `SessionStart – stood
+down`, `SessionStart – assistant's turns stood down` and a `Mod ✓ appended N user turns`
+line). Neither deletes the marker.
 
 **The race this guards against.** The mod and the script share no memory, and both would
 otherwise put the same turns back. The script runs in the SessionStart(compact) settings
-hook, which Claude Code fires after it has installed the compaction, which it can only do
+hooks, which Claude Code fires after it has installed the compaction, which it can only do
 once the `session.compact` hooks have returned the result. The mod writes the marker before
-it returns, so the marker is on disk before the script can run. Two residual cases are
-handled on the script's side: a marker older than two minutes is ignored and removed (a
-compaction whose SessionStart hook never ran must not silence the next one), and the
-marker is consumed on read (one marker, one stand-down). One case is not: if Claude Code
+it returns, so the marker is on disk before the script can run. Which compaction a marker
+belongs to is decided the way the digest's is: it is this compaction's when its time is at
+or after the mtime of this side's bundle (the mod writes it after the PreCompact hooks have
+written both bundles), with five seconds of slack; a marker older than the bundle was left
+by an earlier compaction and is ignored. The marker is read, not consumed: two hooks read
+it now, one per side, and the hooks reference does not say in which order several hooks for
+one event run, so a marker the first reader deleted would be missed by the second, which
+would then inject. A marker older than two minutes is stale: ignored and removed, so one
+left by a compaction whose SessionStart hooks never ran cannot silence a later one. One case is not handled: if Claude Code
 rejects the hook's returned list (for example, a message of the wrong shape) the original
 result stands, the marker is already written, and the script stands down for a compaction
 that got nothing appended. The pane's row would then show `Mod ✓` beside the script's
@@ -176,8 +249,9 @@ handed it, so the shape should always be right, but this is the failure to watch
 **What is verified and what is not.** `claude plugin test` proves the returned list (the
 summary, the kept messages, one framing message, then the last N user messages with their
 handles), the marker, the pane row, and that with the flag off the result is returned
-untouched. `test/run.sh` proves the script stands down on a fresh marker and ignores a
-stale one. **Whether the engine keeps appended handled messages in the next request to the
+untouched. `test/run.sh` proves both sides of the script stand down on a fresh marker
+without deleting it, ignore one older than this compaction's bundles, and remove a stale
+one. **Whether the engine keeps appended handled messages in the next request to the
 model is unverified in the kit: it needs a live `/compact` with the flag on.** The check
 is the one in *Try it* below: after `/compact`, ask Claude what you said right before the
 compaction. If it quotes you, the appended messages reached the model; if it does not, or
@@ -295,11 +369,14 @@ set. A new session picks up the setting; a running one needs `/reload-plugins`.
 
 ## Try it
 
-In a session with some history, open `/before-compact`, then run `/compact`. Two spinners
-should show, "Saving the last turns before compaction" and, after the summary, "Restoring
-your voice from before compaction", and the pane should gain one row with the engine's
-numbers, a duration, and two ✓ marks, with no `(last error: …)` line. Then ask Claude what
-you said right before the compaction; it should quote you.
+In a session with some history, open `/before-compact`, then run `/compact`. Four spinners
+should show, "Saving the last turns before compaction" and "Saving the assistant's last
+turns before compaction", then after the summary "Restoring your voice from before
+compaction" and "Restoring the assistant's turns from before compaction", and the pane
+should gain one row with the engine's numbers, a duration, and three ✓ marks, with no
+`(last error: …)` line. Then ask Claude what you said right before the compaction; it should
+quote you. Then ask what it itself concluded in its last answer before the compaction; if it
+quotes that too, the second block reached it.
 
 Or skip compaction: `/before-compact:recover` runs the extractor by hand.
 
@@ -309,8 +386,8 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
-| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim, the digest printed first and cut to 4,000 with the whole output under 9,000, a stale digest ignored, no digest leaving the output unchanged, and the boundary: a `compact_boundary` entry is what `--recover`, the arc numbering and `--probe` use (with its `compactMetadata` numbers), a turn quoting the phrase beside it is an ordinary turn, and a phrase-only transcript still works | `node`, `python3` |
-| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the brief at its default, the knob set to your own text and cleared (what the engine's side receives, and the rows), both experiments on and off (the digest's model call with the five headings in order, its file, its tab, a refused call), the newest-boundary line from a stubbed `--probe` (numbers, and the no-numbers case), the error line | Claude Code 2.1.287 or later |
+| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh (both sides stand down, neither deletes it), older than the bundles (ignored) and stale (removed), `--raw` verbatim, the digest printed first and cut to 4,000 with the whole output under 9,000, a stale digest ignored, no digest leaving the output unchanged, the boundary: a `compact_boundary` entry is what `--recover`, the arc numbering and `--probe` use (with its `compactMetadata` numbers), a turn quoting the phrase beside it is an ordinary turn, and a phrase-only transcript still works; and the assistant side: the second bundle with no second arc, its framing, assistant turns and no user turn, no pointer line and no digest beside a fresh one, `--min-chars 200` dropping a short turn, `--assistant-max` live, under 9,000 chars, the live fallback, `assistant_turns=false` printing nothing with a recorded reason | `node`, `python3` |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the brief at its default, the knob set to your own text and cleared (what the engine's side receives, and the rows), both experiments on and off (the digest's model call with the five headings in order, its file, its tab, a refused call), the newest-boundary line from a stubbed `--probe` (numbers, and the no-numbers case), the error line, and the assistant side's records drawing the row's second `SessionStart` line in its ✓, ?, – and ✗ states with the user line unchanged | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
 The same three run in GitHub Actions on every push to `main` and every pull request
@@ -329,7 +406,9 @@ automated can trigger a real compaction (`claude plugin eval` cannot either), so
 what proves the two readings the kit takes on trust: that the settings hooks finish inside
 the mod's `classic.*` hooks' `next(e)` (both ✓ marks, no `?`), and that a live engine fires
 `session.compact` into this mod (the row's numbers). With `inject_in_mod` on, it is also the
-only check that the appended messages reached the model. The live check per piece: the arc
+only check that the appended messages reached the model; and it is the only check that the
+two hook outputs, yours and the assistant's, both reach the model, each under its own cap,
+and in which order (see *The assistant's turns* for the question to ask). The live check per piece: the arc
 pointer line visible in context after `/compact` (ask Claude what file holds the full
 back-and-forth); the Summary tab showing the real summary; and, for the brief, a Summary tab
 whose `instructions given to the summarizer:` line shows the brief and whose summary visibly
@@ -348,9 +427,10 @@ request. The one exception is opt-in: with `digest_in_precompact` on, the mod se
 60,000 characters of the dialog to a model through Claude Code's own client, the same place
 the conversation already goes, once per compaction (see *Digest*).
 
-**What it runs:** `node` on its own `scripts/extract_tail.mjs`, twice per compaction from
-the settings hooks, and from the mod with `--probe` (at session start, on Refresh, and
-after a compaction) and with `--recover` (the button on tab 2). Nothing else.
+**What it runs:** `node` on its own `scripts/extract_tail.mjs`, four times per compaction
+from the settings hooks (two entries per event: your turns, then the assistant's), and from
+the mod with `--probe` (at session start, on Refresh, and after a compaction) and with
+`--recover` (the button on tab 2). Nothing else.
 
 **What it reads:**
 
@@ -358,7 +438,9 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   `.jsonl` under `~/.claude/projects/<this directory>/`, to pull your last turns.
 - Its own files under `~/.claude/before-compact/` and `$CLAUDE_PLUGIN_DATA`, the digest
   file included.
-- The environment variable `HOME`, to find those. No credentials, no other variables.
+- The environment variables `HOME`, to find those, and `CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS`,
+  the `assistant_turns` option as Claude Code exports it to hook processes. No credentials,
+  no other variables.
 - From Claude Code: the context usage, the message count, the session id, the cwd, and,
   inside the `session.compact` event, the messages being compacted and the result. With
   `digest_in_precompact` on, the messages' text too, to send to the model.
@@ -367,6 +449,10 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
 
 - `$CLAUDE_PLUGIN_DATA/precompact-<session id>.txt`: your last user turns, at most 9,000
   characters, written before each compaction and read back after it.
+- `$CLAUDE_PLUGIN_DATA/precompact-<session id>-assistant.txt`: the assistant's last turns,
+  at most 9,000 characters, turns under 200 characters skipped and each cut after its first
+  1,500, written and read back the same way by the second hook of each event. Not written
+  when `assistant_turns` is off.
 - `$CLAUDE_PLUGIN_DATA/arc-<session id>-<n>.txt`: the back-and-forth of the window the
   compaction is about to summarize, that is, the turns after the most recent
   compaction boundary in the transcript (the whole transcript before the first
@@ -380,20 +466,29 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   only if it decides the task needs it. Its turn count, size and token figure (the ones
   on the file's own stats line) are in the status record, so the pane can show them.
 - `~/.claude/before-compact/status-<session id>.json`: one small record per hook run
-  (times, counts, paths), at most 50 entries. The mod reads it; nothing else does.
+  (times, counts, paths; `side` says which side wrote it), at most 50 entries. The mod
+  reads it; nothing else does.
 - `~/.claude/before-compact/injected-<session id>.json`, only with the `inject_in_mod`
-  experiment on: a one-line marker the mod writes and the script deletes on read.
+  experiment on: a one-line marker the mod writes before each compaction and both sides of
+  the script read; the script deletes it only once it is older than two minutes.
 - `~/.claude/before-compact/digest-<session id>.json`, only with the `digest_in_precompact`
   experiment on: the model's digest of the dialog, rewritten before each compaction. One
   more copy of the conversation on disk; nothing deletes it but you.
 - Nothing else: no settings, no instructions files, nothing under the project.
 
-**What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
-bundle above with a one-sentence factual framing and one factual line that states where
-the newest arc file is, with its turn count and token figure. That is the whole point of the plugin
-and, with the defaults, the only way it touches the conversation. With the `inject_in_mod`
-experiment on, the mod instead hands the engine your last user messages, unchanged, after
-the summary, and the hook prints nothing (see *The experiment*). The summarizer is given the
+**What reaches Claude:** two blocks after a compaction, the stdout of the two SessionStart
+hooks. The first is your bundle with a one-sentence factual framing and one factual line
+that states where the newest arc file is, with its turn count and token figure. The second
+is the assistant's bundle under its own factual framing, nothing else. Each is its own hook
+output under its own cap: the hooks reference measures the 10,000-character limit on "each
+string on its own, even when several hooks run for the same event", and says that "when
+several hooks return additionalContext for the same event, Claude receives all of the
+values"; it does not say in which order, and a live `/compact` is the only check that both
+arrive (see *The assistant's turns*). That is the whole point of the plugin and, with the
+defaults, the only way it touches the conversation. With `assistant_turns` off the second
+block is not printed. With the `inject_in_mod` experiment on, the mod instead hands the
+engine your last user messages, unchanged, after the summary, and both hooks print nothing
+(see *The experiment*). The summarizer is given the
 `summary_instructions` text in addition to yours, by default the plugin's brief (see *The
 brief*); the conversation itself gets nothing extra from that. With the `digest_in_precompact`
 experiment on, the hook prints the digest ahead of the bundle, under its own factual line
@@ -430,11 +525,14 @@ per compaction, each the size of one window.
 
 ## Known limits
 
-- The SessionStart output is capped by Claude Code at 10,000 characters; over that it is
-  written to a file and replaced with a 2,000-character preview. The hooks pass
-  `--max-chars 9000` for the whole output: the script reserves 800 characters of that for
+- Each SessionStart hook's output is capped by Claude Code at 10,000 characters; over that
+  it is written to a file and replaced with a 2,000-character preview. Both hooks pass
+  `--max-chars 9000` for their whole output: the script reserves 800 characters of that for
   the framing sentence, the arc pointer line and the stats line, and drops the oldest turns
-  first to keep the rest of the turns under what is left. `test/run.sh` checks the total.
+  first to keep the rest of the turns under what is left. `test/run.sh` checks both totals.
+  The cap is documented per string, so the two outputs do not share one budget; whether a
+  live build applies any combined limit, and in which order the two blocks reach the model,
+  is not documented and not yet measured here.
 - The arc has no budget, but it is bounded to one window: the turns since the last
   compaction. On a session that compacts often each arc stays the size of one epoch; the
   files accumulate under `$CLAUDE_PLUGIN_DATA` (one per compaction) until you delete them.
