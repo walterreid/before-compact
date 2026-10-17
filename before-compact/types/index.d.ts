@@ -39,10 +39,14 @@ export type Compaction = {
    * session.compact result, capped at 9,500 chars for the pane's Summary tab.
    */
   summary: string | null
-  /** The arc file the script wrote beside the bundle (path, turns, size), from its PreCompact record. */
+  /**
+   * The arc file the script wrote beside the bundle for this compaction's window
+   * (path, turns, size, the file's own token figure), from its PreCompact record.
+   */
   arc: string | null
   arcTurns: number | null
   arcChars: number | null
+  arcTokens: number | null
 }
 
 /** The compaction in flight: opened by classic.PreCompact, completed by session.compact. */

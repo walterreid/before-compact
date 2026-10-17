@@ -246,7 +246,7 @@ function row(fields) {
     preAt: null, saved: null, savedTurns: null, savedTokens: null, bundle: null,
     postAt: null, injected: null, injectedTokens: null, origin: null,
     modAppended: null, modChars: null,
-    summary: null, arc: null, arcTurns: null, arcChars: null,
+    summary: null, arc: null, arcTurns: null, arcChars: null, arcTokens: null,
     ...fields,
     ...(fields.id ? {} : { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }),
   }
@@ -263,7 +263,7 @@ function row(fields) {
 // The arc fields of a status record, when it has them (PreCompact always; a
 // SessionStart record when the fallback path wrote the arc).
 function arcOf(rec) {
-  return rec.arc_chars != null ? { arc: rec.arc ?? null, arcTurns: rec.arc_turns ?? null, arcChars: rec.arc_chars } : {}
+  return rec.arc_chars != null ? { arc: rec.arc ?? null, arcTurns: rec.arc_turns ?? null, arcChars: rec.arc_chars, arcTokens: rec.arc_tokens_est ?? null } : {}
 }
 // The newest main-conversation row whose `field` is still unknown, or -1.
 function newestOpen(list, field) {
@@ -498,7 +498,7 @@ export function register(on, options) {
         const n = list.length
         const sumChars = c.summary ? c.summary.length : 0
         body = [
-          Text({ bold: true, children: [`#${n}  ${fmtK(c.beforeTokens)} → ${fmtK(c.afterTokens)} tokens   summary ${fmtK(sumChars)} chars (~${fmtK(Math.round(sumChars / 4))} tokens)   arc on disk ${c.arcChars != null ? `${fmtK(c.arcChars)} chars (~${fmtK(Math.round(c.arcChars / 4))} tokens, ${c.arcTurns ?? '?'} turns)` : 'no record (press r)'}`] }),
+          Text({ bold: true, children: [`#${n}  ${fmtK(c.beforeTokens)} → ${fmtK(c.afterTokens)} tokens   summary ${fmtK(sumChars)} chars (~${fmtK(Math.round(sumChars / 4))} tokens)   arc on disk ${c.arcChars != null ? `${fmtK(c.arcChars)} chars (~${fmtK(c.arcTokens ?? Math.round(c.arcChars / 4))} tokens, ${c.arcTurns ?? '?'} turns)` : 'no record (press r)'}`] }),
           Text({ dimColor: true, children: [c.arc ? `arc: ${c.arc}` : 'arc: not written for this compaction'] }),
           ...(c.instructions ? [Text({ dimColor: true, wrap: 'wrap', children: [`instructions given to the summarizer: ${c.instructions}`] })] : []),
           Text({ children: [' '] }),

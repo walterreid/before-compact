@@ -24,9 +24,9 @@ const STATUS = `${HOME}/.claude/before-compact/status-${SESSION}.json`
 const BUNDLE = '/data/precompact-sess1.txt'
 
 // The two records scripts/extract_tail.mjs writes (see recordStatus there).
-const ARC = '/data/arc-sess1.txt'
+const ARC = '/data/arc-sess1-1.txt'
 const PRE = { at: '2026-10-16T14:58:00.000Z', event: 'PreCompact', trigger: 'manual', written: true, bundle: BUNDLE,
-  turns: 32, chars: 4000, tokens_est: 1000, arc: ARC, arc_written: true, arc_turns: 62, arc_chars: 44000, arc_tokens_est: 11000, transcript: '/x.jsonl' }
+  turns: 32, chars: 4000, tokens_est: 1000, arc: ARC, arc_written: true, arc_turns: 62, arc_chars: 44000, arc_tokens_est: 9800, transcript: '/x.jsonl' }
 const POST = { at: '2026-10-16T14:58:05.000Z', event: 'SessionStart', source: 'compact', origin: 'prepared by the PreCompact hook',
   chars: 4100, tokens_est: 1025, bundle: BUNDLE, transcript: '/x.jsonl', injected: true }
 
@@ -145,7 +145,7 @@ test('the Summary tab: the result\'s first message, with the token counts and th
 
   // Tab 3 (the module remembers the tab): the numbers line, the arc path, then the summary text.
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^#1 {2}82k → 19k tokens {3}summary 128 chars \(~32 tokens\) {3}arc on disk 44k chars \(~11k tokens, 62 turns\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#1 {2}82k → 19k tokens {3}summary 128 chars \(~32 tokens\) {3}arc on disk 44k chars \(~10k tokens, 62 turns\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: `arc: ${ARC}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: keep the plan$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: SUM.text })).toBeDefined()

@@ -9,8 +9,8 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 
 | Component | When | What |
 | --- | --- | --- |
-| `hooks/hooks.json` → `PreCompact` | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>.txt`: both roles, assistant turns untruncated, noise stripped, no budget |
-| `hooks/hooks.json` → `SessionStart (compact)` | right after compaction | prints that bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One line after the framing names the arc file, its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
+| `hooks/hooks.json` → `PreCompact` | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
+| `hooks/hooks.json` → `SessionStart (compact)` | right after compaction | prints that bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One factual line after the framing states where the newest arc file is, with its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
 | `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the instructions the summarizer was given, how long the summary took, and the summary itself. With `summary_instructions` set, appends that text to the instructions on the way down (see *The knob*). With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
@@ -57,7 +57,7 @@ one line with the token counts before and after, the summary's own size, and the
 the arc file on disk:
 
     #1  82k → 19k tokens   summary 2k chars (~512 tokens)   arc on disk 44k chars (~11k tokens, 62 turns)
-    arc: /Users/you/.claude/plugins/data/before-compact-inline/arc-<session>.txt
+    arc: /Users/you/.claude/plugins/data/before-compact-inline/arc-<session>-1.txt
     instructions given to the summarizer: keep the plan
 
 That is the comparison the tab is for: what the summary kept (its text and size) against
@@ -189,7 +189,7 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
-| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, named by the pointer line with its turn count, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
+| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
 | `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), the experiment on and off, the error line | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
@@ -231,12 +231,18 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
 
 - `$CLAUDE_PLUGIN_DATA/precompact-<session id>.txt`: your last user turns, at most 9,000
   characters, written before each compaction and read back after it.
-- `$CLAUDE_PLUGIN_DATA/arc-<session id>.txt`: the full back-and-forth, both roles,
-  assistant turns untruncated, harness noise stripped, no character budget; written before
-  each compaction beside the bundle (and by the SessionStart fallback when no bundle is
-  fresh). Read by nothing automatically: the SessionStart output names its path, turn count
-  and token estimate, and the model reads the file only if it decides the task needs it.
-  Its size is in the status record (`arc_chars`), so the pane can show it.
+- `$CLAUDE_PLUGIN_DATA/arc-<session id>-<n>.txt`: the back-and-forth of the window the
+  compaction is about to summarize, that is, the turns after the most recent
+  compaction-summary marker in the transcript (the whole transcript before the first
+  compaction); both roles, assistant turns untruncated, harness noise stripped, no
+  character budget. One file per compaction, never overwritten: `n` is the number of
+  compaction markers already in the transcript plus one, so the first compaction writes
+  `-1.txt`, the second `-2.txt`, each holding its own epoch. Written before each compaction
+  beside the bundle (and by the SessionStart fallback when no bundle is fresh, for the
+  window the new summary closed). Read by nothing automatically: the SessionStart output
+  states the newest one's path, turn count and token figure, and the model reads the file
+  only if it decides the task needs it. Its turn count, size and token figure (the ones
+  on the file's own stats line) are in the status record, so the pane can show them.
 - `~/.claude/before-compact/status-<session id>.json`: one small record per hook run
   (times, counts, paths), at most 50 entries. The mod reads it; nothing else does.
 - `~/.claude/before-compact/injected-<session id>.json`, only with the `inject_in_mod`
@@ -244,8 +250,8 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
 - Nothing else: no settings, no instructions files, nothing under the project.
 
 **What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
-bundle above with a one-sentence factual framing and one line that names the arc file
-(its path, turn count and token estimate). That is the whole point of the plugin
+bundle above with a one-sentence factual framing and one factual line that states where
+the newest arc file is, with its turn count and token figure. That is the whole point of the plugin
 and, with the defaults, the only way it touches the conversation. With the `inject_in_mod`
 experiment on, the mod instead hands the engine your last user messages, unchanged, after
 the summary, and the hook prints nothing (see *The experiment*). With `summary_instructions`
@@ -275,7 +281,9 @@ when you ask it to: `summary_instructions` adds your text to the summarizer's in
 and `inject_in_mod` appends your own messages after the summary. Both are off by default.
 
 **To remove what it leaves behind,** delete `~/.claude/before-compact/` and the plugin's
-data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from a path).
+data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from a path),
+which holds the bundles and the arcs. The arcs are the only files that accumulate: one
+per compaction, each the size of one window.
 
 ## Known limits
 
@@ -284,8 +292,13 @@ data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from
   `--max-chars 9000` for the whole output: the script reserves 800 characters of that for
   the framing sentence, the arc pointer line and the stats line, and drops the oldest turns
   first to keep the rest of the turns under what is left. `test/run.sh` checks the total.
-- The arc has no budget, so on a long session it is large (a few hundred turns can be
-  100k+ characters). It is a file on disk, read on demand; it costs nothing until read.
+- The arc has no budget, but it is bounded to one window: the turns since the last
+  compaction. On a session that compacts often each arc stays the size of one epoch; the
+  files accumulate under `$CLAUDE_PLUGIN_DATA` (one per compaction) until you delete them.
+- The window's boundary is the compaction-summary marker Claude Code writes into the
+  transcript (the "This session is being continued…" user turn), the same marker
+  `--recover` and `--probe` use. A user or assistant turn that quotes that phrase would
+  count as a boundary too.
 - The PreCompact bundle is considered fresh for 15 minutes. After that SessionStart extracts
   live from the transcript instead, using the compaction-summary marker to find the seam.
 - `$CLAUDE_PLUGIN_DATA` falls back to the OS temp dir when unset (for example when the
