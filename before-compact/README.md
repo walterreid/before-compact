@@ -14,8 +14,8 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
 | `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the instructions the summarizer was given, how long the summary took, and the summary itself. With `summary_instructions` set, appends that text to the instructions on the way down (see *The knob*). With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
-| `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks |
-| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, and a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it. Toasts when a compaction starts and finishes |
+| `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks. With `digest_in_precompact` on, `classic.PreCompact` also asks a model for a digest of the dialog and writes it to disk before the engine summarizes (see *Digest*) |
+| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it, and a **Digest** tab beside it for the `digest_in_precompact` experiment. Toasts when a compaction starts and finishes |
 | `types/index.d.ts` | load time | declares the two `$.state` values (the log, with each row's summary text and arc size, and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
 
 The two hooks are tiers 2 and 3 from the script's own header. Tier 1 (a "Compaction
@@ -26,7 +26,7 @@ once the plugin is installed, but it does no harm.
 
 Type `/before-compact`. The pane shows:
 
-    1: Monitor   2: Last bundle   3: Summary   r: Refresh
+    1: Monitor   2: Last bundle   3: Summary   4: Digest   r: Refresh
 
     Context now
     ▕████████████░░░░░░░░░░░░░░░░░░▏ 41%  82k / 200k tokens
@@ -49,7 +49,8 @@ The row's numbers are the engine's own: the `session.compact` event's result car
 every 2 s. The ✓ marks come from a status record the script writes to
 `~/.claude/before-compact/` inside each settings hook; a `?` means no record arrived (press
 `r`). Two ✓ marks and a drop in the numbers is what "compaction is working" looks like.
-Press `2` for the exact text that went back into context. Esc closes the pane.
+Press `2` for the exact text that went back into context, `3` for the summary the engine
+installed, `4` for the digest the `digest_in_precompact` experiment wrote. Esc closes the pane.
 
 Press `3` for the **Summary** tab: the summary the engine installed, verbatim (the first
 message of the `session.compact` result, capped at 9,500 characters for the pane), under
@@ -151,6 +152,85 @@ is the one in *Try it* below: after `/compact`, ask Claude what you said right b
 compaction. If it quotes you, the appended messages reached the model; if it does not, or
 `/context` shows no growth, they were dropped. The pane cannot tell the two apart.
 
+## Digest
+
+The second experiment: `digest_in_precompact`, off by default, with `digest_model` (default
+`haiku`) and `digest_max_tokens` (default 1500). Leave it off unless you are running the
+comparison below.
+
+**What it is for.** The engine's summary keeps the facts and flattens how the dialog went:
+the constraints you stated, the corrections you made, a decision and its reversal, what was
+checked as against guessed, what is still open. The verbatim turns keep your voice but only
+the last few thousand characters of it. The digest tries for the middle: a second summary,
+written to a fixed shape that asks for exactly those things.
+
+**What it does.** With the flag on, the mod's `classic.PreCompact` hook, after the settings
+hook has saved the bundle, reads `$.session.messages()`, keeps user and assistant text only
+(tool calls, tool results and harness noise dropped the way the script's `stripNoise` does;
+an earlier compaction's summary skipped), takes the newest turns under 60,000 characters,
+and calls `$.model.complete` with a system prompt that asks for a digest under five headings
+in this order: *Constraints and preferences* (quoted verbatim where short), *Decisions*
+(latest state first, naming any reversal), *Corrections*, *Verified vs assumed*, *Open
+threads*. The prompt says to prefer the latest state of each decision and to quote you
+rather than paraphrase where the wording matters. The reply is written to
+`~/.claude/before-compact/digest-<session>.json` (`{ at, model, chars, turns, text, … }`)
+before the hook returns, so it is on disk before the engine summarizes. After the compaction
+the SessionStart hook prints it first, under one factual line (*A digest of the dialog before
+the compaction, written by haiku from the last N turns:*), then your turns; the digest gets
+at most 4,000 of the 9,000-character budget and the turns the rest, oldest dropped first. A
+digest older than 15 minutes is ignored, and so is one older than the bundle the script's
+own PreCompact hook wrote for this compaction: the mod's hook runs after the script's, so a
+digest of this compaction is newer than the bundle, and one left behind by an earlier
+compaction (the flag turned off since) is not and must not displace this compaction's turns
+with the wrong epoch's digest. The status record says why one was skipped
+(`digest_skipped`: `stale`, `older than the bundle`, or null). Any failure (no answer, a
+refused request, a failed write) writes nothing, shows in the pane as `Digest ✗` and as the
+last error, and the compaction goes on. The call is made with `timeoutMs: 120000`, which
+the 2.1.299 API declarations (the file the plugin-authoring skill writes for this build)
+list on the request as "how long the whole call may take before it resolves `aborted`";
+the 2.1.277 declarations do not list it, and whether a live call honours it is unverified.
+If the field is ignored, the hook's own limits are what bound the call.
+
+**What it costs.** One model call per compaction, billed to your usage: up to ~15k tokens
+in (the 60,000 characters of dialog) and `digest_max_tokens` out, through Claude Code's own
+client. The model call's time does not count against the hook's budget, but it does add to
+how long the compaction takes. The row's duration most likely includes it: the digest runs
+inside `classic.PreCompact`, which this mod reads as running inside `session.compact`'s
+`next(e)`, the span the duration measures. That is unmeasured; the Digest line's own time is
+the call alone.
+
+**Read this before trusting it.**
+
+- The digest is also a summary. It is written by a model from the same dialog, and it
+  inherits the tangent problem: a long detour late in the session is as likely to fill
+  the digest as it is to fill the engine's summary, and the fixed headings do not stop that.
+- Its correctness is unmeasured until the protocol below has been run. The kit proves the
+  call is made with the right prompt and the file is written; it says nothing about whether
+  a real model's digest is true to the dialog.
+- It is one more copy of the conversation on disk, under `~/.claude/before-compact/`,
+  beside the bundle. Delete the directory to remove it.
+
+**The comparison protocol.** This is how to find out whether the digest earns its cost.
+Run the live protocol in `test/live-protocol.md` with the flag **off** first: the digest takes
+up to 4,000 of the 9,000 characters that would otherwise carry your turns, so a run with it
+on measures a different injection, not the same one plus a digest.
+
+1. In a session with real history, turn `digest_in_precompact` on, run `/compact`, and
+   open `/before-compact`. Read tab 3 (the engine's summary) and tab 4 (the digest) side by
+   side. Note what each holds that the other does not: a constraint, a reversal, a
+   correction, an open thread.
+2. Write down five questions whose answers are in the arc of the session before the
+   compaction and not in the last few turns: a constraint you stated early, a decision that
+   was reversed, something you corrected, something that was verified rather than assumed,
+   something left open.
+3. Ask Claude each of the five, in that compacted session, and record which it answered
+   correctly. Then repeat the session's shape with the flag off (or `/resume` a copy
+   compacted without it) and ask the same five. The digest is worth its cost when the
+   first count is reliably higher; the Summary tab is the control.
+
+Until someone has done that, the honest description of the digest is: a second summary with
+a better prompt, unmeasured.
+
 ## Install
 
 Needs Node 18+ on `PATH`. The plugin is the `before-compact/` folder of this repo; the repo
@@ -189,8 +269,8 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
-| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
-| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), the experiment on and off, the error line | Claude Code 2.1.287 or later |
+| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim, the digest printed first and cut to 4,000 with the whole output under 9,000, a stale digest ignored, no digest leaving the output unchanged | `node`, `python3` |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), both experiments on and off (the digest's model call with the five headings in order, its file, its tab, a refused call), the error line | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
 Then the live layer, the only one that proves the conversation actually changed. Nothing
@@ -212,7 +292,10 @@ at all.
 
 ## What it runs and changes
 
-**It sends nothing anywhere.** Neither the hooks nor the mod makes a network request.
+**It sends nothing anywhere of its own.** Neither the hooks nor the mod makes a network
+request. The one exception is opt-in: with `digest_in_precompact` on, the mod sends the last
+60,000 characters of the dialog to a model through Claude Code's own client, the same place
+the conversation already goes, once per compaction (see *Digest*).
 
 **What it runs:** `node` on its own `scripts/extract_tail.mjs`, twice per compaction from
 the settings hooks, and from the mod with `--probe` (at session start, on Refresh, and
@@ -222,10 +305,12 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
 
 - The transcript Claude Code names in the hook input, and from the mod the newest
   `.jsonl` under `~/.claude/projects/<this directory>/`, to pull your last turns.
-- Its own files under `~/.claude/before-compact/` and `$CLAUDE_PLUGIN_DATA`.
+- Its own files under `~/.claude/before-compact/` and `$CLAUDE_PLUGIN_DATA`, the digest
+  file included.
 - The environment variable `HOME`, to find those. No credentials, no other variables.
 - From Claude Code: the context usage, the message count, the session id, the cwd, and,
-  inside the `session.compact` event, the messages being compacted and the result.
+  inside the `session.compact` event, the messages being compacted and the result. With
+  `digest_in_precompact` on, the messages' text too, to send to the model.
 
 **What it writes:**
 
@@ -247,6 +332,9 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   (times, counts, paths), at most 50 entries. The mod reads it; nothing else does.
 - `~/.claude/before-compact/injected-<session id>.json`, only with the `inject_in_mod`
   experiment on: a one-line marker the mod writes and the script deletes on read.
+- `~/.claude/before-compact/digest-<session id>.json`, only with the `digest_in_precompact`
+  experiment on: the model's digest of the dialog, rewritten before each compaction. One
+  more copy of the conversation on disk; nothing deletes it but you.
 - Nothing else: no settings, no instructions files, nothing under the project.
 
 **What reaches Claude:** the SessionStart hook's stdout after a compaction, which is the
@@ -256,23 +344,26 @@ and, with the defaults, the only way it touches the conversation. With the `inje
 experiment on, the mod instead hands the engine your last user messages, unchanged, after
 the summary, and the hook prints nothing (see *The experiment*). With `summary_instructions`
 set, the summarizer is given that text in addition to yours (see *The knob*); the
-conversation itself gets nothing extra. Nothing else is ever added.
+conversation itself gets nothing extra. With the `digest_in_precompact` experiment on, the
+hook prints the digest ahead of the bundle, under its own factual line (see *Digest*).
+Nothing else is ever added.
 
 **How it hooks into Claude Code** (from `claude plugin validate --strict`, with its `via` notes dropped):
 
-    ./register.js hooks: config.set{key=/(^|\.)(inject_(in_mod|turns|max_chars)|summary_instructions)$/},
+    ./register.js hooks: config.set{key=/(^|\.)(inject_(in_mod|turns|max_chars)|summary_instructions|digest_(in_precompact|model|max_tokens))$/},
       session.start, command.run{command=before-compact}, session.compact,
       classic.PreCompact, classic.SessionStart{source=compact},
       ui.render{component=Pane, requestId=before-compact}
     ./register.js calls: $.clock.every, $.command.register, $.env.get, $.fs.exists,
-      $.fs.list, $.fs.read, $.fs.stat, $.fs.write, $.process.run, $.session.cwd,
-      $.session.id, $.session.messages, $.session.usage, $.state.get, $.state.set,
-      $.ui.invalidate, $.ui.log, $.ui.open, $.ui.resolve, $.ui.toast
+      $.fs.list, $.fs.read, $.fs.stat, $.fs.write, $.model.complete, $.process.run,
+      $.session.cwd, $.session.id, $.session.messages, $.session.usage, $.state.get,
+      $.state.set, $.ui.invalidate, $.ui.log, $.ui.open, $.ui.resolve, $.ui.toast
     ./register.js env reads: HOME
     ./register.js state writes: before-compact.compactions, before-compact.pending
     ./register.js state reads: before-compact.compactions, before-compact.pending
 
-`$.fs.write` is the experiment's marker file and nothing else. The validator also notes that
+`$.fs.write` is the two experiments' files (the marker, the digest) and nothing else;
+`$.model.complete` is the digest experiment's one call, made only with its flag on. The validator also notes that
 where an organization manages Claude Code, `session.compact`, `classic.PreCompact` and
 `classic.SessionStart` do not run in a plugin a person installs; the settings hooks still do.
 

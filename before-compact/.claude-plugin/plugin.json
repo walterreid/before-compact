@@ -33,6 +33,24 @@
       "title": "Experiment: character budget for the appended turns",
       "description": "Used only when inject_in_mod is on. Newest turns are kept first; older ones are dropped once the budget is spent.",
       "default": 9000
+    },
+    "digest_in_precompact": {
+      "type": "boolean",
+      "title": "Experiment: write a digest of the dialog before each compaction",
+      "description": "Off (default): nothing. On: before the engine summarizes, the mod sends the last turns of the dialog (user and assistant text, up to 60,000 characters) to a model and writes its digest (constraints, decisions, corrections, verified vs assumed, open threads) to ~/.claude/before-compact/digest-<session>.json; the SessionStart hook prints it ahead of your turns. One model call per compaction, billed to your usage. Its correctness is unmeasured; see the README.",
+      "default": false
+    },
+    "digest_model": {
+      "type": "string",
+      "title": "Experiment: the model that writes the digest",
+      "description": "Used only when digest_in_precompact is on. An alias (haiku, sonnet, opus) or a full model id, resolved like --model.",
+      "default": "haiku"
+    },
+    "digest_max_tokens": {
+      "type": "number",
+      "title": "Experiment: the digest's output cap, in tokens",
+      "description": "Used only when digest_in_precompact is on. 1 to 64000; about 4,000 characters of the digest are injected after the compaction, the rest is on disk.",
+      "default": 1500
     }
   }
 }
