@@ -42,6 +42,17 @@ On a session that was compacted before the plugin was installed, "Compactions th
 stays 0 (the mod only logs compactions it watched), but the line under it reports the markers
 it finds in the transcript on disk, and tab 2 has a **Recover from transcript** button (`g`)
 that runs `--recover` on that transcript and shows the turns before the last compaction.
+Under that line, one more gives the newest boundary's own numbers, read by `--probe` from
+the transcript's `compact_boundary` entry:
+
+    Transcript on disk: 1 compaction marker(s) in 5079 events
+      newest boundary: 966k → 26k tokens, 7 messages preserved (auto, 103.2 s; the engine's own numbers, from the transcript)
+
+These are the figures Claude Code itself recorded when it compacted (`preTokens`,
+`postTokens`, the count of preserved messages, the trigger and the summary's duration), so a
+session on a Claude Code that runs the mod but never fires `session.compact` into it still
+gets real numbers, not `?`. An older transcript with only the phrase marker gets a line
+saying there are no engine numbers for it.
 
 The row's numbers are the engine's own: the `session.compact` event's result carries
 `tokensBefore` and `tokensAfter`, and its message lists give the counts before and after;
@@ -190,7 +201,7 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
 | `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim, and the boundary: a `compact_boundary` entry is what `--recover`, the arc numbering and `--probe` use (with its `compactMetadata` numbers), a turn quoting the phrase beside it is an ordinary turn, and a phrase-only transcript still works | `node`, `python3` |
-| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), the experiment on and off, the error line | Claude Code 2.1.287 or later |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), the experiment on and off, the newest-boundary line from a stubbed `--probe` (numbers, and the no-numbers case), the error line | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
 Then the live layer, the only one that proves the conversation actually changed. Nothing

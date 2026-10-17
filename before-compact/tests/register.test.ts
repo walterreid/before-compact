@@ -393,6 +393,67 @@ test('summary_instructions empty (the default): the engine receives the event un
   expect(seen[1]).toMatchObject(without)
 })
 
+test('the newest boundary on disk: --probe\'s compactMetadata numbers on the monitor, with no row from session.compact', async ($, on) => {
+  // A Claude Code that runs the mod but never fires session.compact into it (or a
+  // session compacted before the plugin was installed): the log is empty, but the
+  // transcript's compact_boundary entry has the engine's numbers, and the pane shows them.
+  mock.clock(on)
+  mock.env(on, { HOME })
+  const PROJ = `${HOME}/.claude/projects/-work`
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 26000, window: 1000000, percent: 3 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: SESSION }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', ($, e) => ({ value: e.path === PROJ }))
+  on('fs.list', () => ({ value: [{ name: 'abc.jsonl' }] }))
+  on('fs.stat', () => ({ value: { mtimeMs: 1 } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  // What scripts/extract_tail.mjs --probe prints for a transcript with one compact_boundary entry
+  // (the figures are a real boundary's: preTokens 965550, postTokens 25855, 7 preserved uuids).
+  const PROBE = {
+    transcript: `${PROJ}/abc.jsonl`, events: 5079, user_events: 966, assistant_events: 1575, compactions: 1, boundary_source: 'compact_boundary',
+    markers: [{ index: 1857, summary_index: 1858, at: '2026-09-27T15:33:49.229Z', source: 'compact_boundary', summary_chars: 20916,
+      trigger: 'auto', preTokens: 965550, postTokens: 25855, durationMs: 103240, preserved: 7 }],
+  }
+  const runs: string[][] = []
+  on('process.run', ($, e) => { runs.push(e.argv ?? e.command ?? e.args ?? []); return { value: { exitCode: 0, stdout: JSON.stringify(PROBE) + '\n', stderr: '' } } })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Compactions this session: 0$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Transcript on disk: 1 compaction marker\(s\) in 5079 events \(more than the log below/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}newest boundary: 966k → 26k tokens, 7 messages preserved \(auto, 103\.2 s; the engine's own numbers, from the transcript\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  // The probe was --probe on the transcript findTranscript picked.
+  expect(JSON.stringify(runs)).toMatch(/--probe/)
+  await ui.unmount()
+})
+
+test('an older transcript: the phrase marker alone gives no engine numbers, and the line says so', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HOME })
+  const PROJ = `${HOME}/.claude/projects/-work`
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1000, window: 200000, percent: 1 }, rateLimits: [], cost: 0 } }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.id', () => ({ value: SESSION }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', ($, e) => ({ value: e.path === PROJ }))
+  on('fs.list', () => ({ value: [{ name: 'abc.jsonl' }] }))
+  on('fs.stat', () => ({ value: { mtimeMs: 1 } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  const PROBE = { transcript: `${PROJ}/abc.jsonl`, events: 66, user_events: 33, assistant_events: 33, compactions: 1, boundary_source: 'phrase',
+    markers: [{ index: 60, summary_index: 60, at: null, source: 'phrase', summary_chars: 70, trigger: null, preTokens: null, postTokens: null, durationMs: null, preserved: null }] }
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(PROBE), stderr: '' } }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /^Transcript on disk: 1 compaction marker\(s\) in 66 events/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}newest boundary: no engine numbers \(an older transcript/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /→ .* tokens, .* messages preserved/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a failed --probe shows the useful error line, not node\'s loader preamble', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HOME })

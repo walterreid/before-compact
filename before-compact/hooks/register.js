@@ -113,7 +113,7 @@ let usage = null               // { tokens, window, percent } from $.session.usa
 let messageCount = null        // length of $.session.messages(), for the gauge
 let bundleText = ''            // the last bundle, for the second tab
 let lastError = ''
-let transcript = null          // { path, compactions, events, markers } from --probe, or null
+let transcript = null          // --probe's JSON: { transcript, events, compactions, boundary_source, markers: [{ trigger, preTokens, postTokens, durationMs, preserved, … }] }, or null
 let transcriptPath = null      // the .jsonl findTranscript picked, even when --probe failed
 let recovering = false         // the "Recover from transcript" button is running
 
@@ -563,14 +563,24 @@ export function register(on, options) {
       }
 
       const history = transcript
-        ? Text({ dimColor: true, children: [`Transcript on disk: ${transcript.compactions} compaction marker(s) in ${transcript.events} events${transcript.compactions > list.length ? ' (earlier than this plugin was watching; see tab 2)' : ''}`] })
+        ? Text({ dimColor: true, children: [`Transcript on disk: ${transcript.compactions} compaction marker(s) in ${transcript.events} events${transcript.compactions > list.length ? ' (more than the log below: compacted before this plugin was watching, or on a Claude Code that does not fire session.compact; see tab 2)' : ''}`] })
         : transcriptPath
           ? Text({ dimColor: true, children: ['Transcript on disk: found, but --probe failed (see last error below)'] })
           : Text({ dimColor: true, children: ['Transcript on disk: not found for this directory'] })
+      // The newest boundary's own numbers, from the transcript's compact_boundary
+      // entry (--probe reads its compactMetadata). Real figures even where the log
+      // above is empty because session.compact never reached this mod.
+      const newest = transcript && Array.isArray(transcript.markers) && transcript.markers.length ? transcript.markers[transcript.markers.length - 1] : null
+      const boundary = newest
+        ? Text({ dimColor: true, children: [newest.preTokens != null || newest.postTokens != null
+            ? `  newest boundary: ${fmtK(newest.preTokens)} → ${fmtK(newest.postTokens)} tokens, ${newest.preserved ?? '?'} messages preserved (${newest.trigger || '?'}, ${fmtSecs(newest.durationMs)}; the engine's own numbers, from the transcript)`
+            : '  newest boundary: no engine numbers (an older transcript: the phrase marker only, no compact_boundary entry)'] })
+        : null
       body = [
         ...live,
         Text({ bold: true, children: [`Compactions this session: ${list.length}`] }),
         history,
+        ...(boundary ? [boundary] : []),
         ...rows,
         Text({ children: [' '] }),
         Text({ dimColor: true, children: ['How to read it: tokens/messages drop at compaction (the engine\'s own counts); the two ✓ marks mean your last turns were saved before and put back after.'] }),
