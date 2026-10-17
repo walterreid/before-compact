@@ -115,6 +115,10 @@ grep -q '"digest_chars": 4' "$HOME/.claude/before-compact/status-t.json" || fail
 # A bundle that would overflow with the digest in front: the oldest turns go, the newest stays, still under 9000.
 echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role both >/dev/null
 [ "$(wc -c < "$W/data/precompact-t.txt")" -gt 5000 ] || fail "the --role both bundle is too small to test trimming"
+python3 - "$D" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({"at":sys.argv[2],"model":"haiku","chars":4500,"turns":12,"text":"## Constraints and preferences\n- \"no pushes\"\n"+("digest line\n"*400)}))
+PY
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role both)
 [ "$(wc -c <<<"$out")" -lt 9000 ] || fail "output with a digest and a full bundle is not under 9000 chars"
 grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "trimming dropped the newest turn"
@@ -129,9 +133,32 @@ echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 grep -q "A digest of the dialog" <<<"$out" && fail "a stale digest was injected"
 [[ "$out" == "The following are verbatim prior turns"* ]] || fail "without a fresh digest the output changed"
+grep -q '"digest_skipped": "stale"' "$HOME/.claude/before-compact/status-t.json" || fail "the stale skip was not recorded"
 # No digest file at all: unchanged too.
 rm -f "$D"
 out2=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [ "$out" == "$out2" ] || fail "output without a digest file differs from output with a stale one"
 grep -q '"digest_chars": 0' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars 0 not recorded when no digest was injected"
+# A digest from an EARLIER compaction (5 minutes old, so still fresh) left behind after the flag was turned
+# off: this compaction's bundle is newer than it, so it is the wrong epoch's digest and must not be injected.
+python3 - "$D" <<'PY'
+import json,sys,datetime
+at=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+open(sys.argv[1],"w").write(json.dumps({"at":at,"model":"haiku","chars":40,"turns":4,"text":"## Constraints and preferences\n- OLD EPOCH DIGEST"}))
+PY
+echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user >/dev/null
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+grep -q "OLD EPOCH DIGEST" <<<"$out" && fail "a digest older than this compaction's bundle was injected"
+[[ "$out" == "The following are verbatim prior turns"* ]] || fail "with an older-epoch digest the output does not start with the turns' framing"
+grep -q '"digest_chars": 0' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars 0 not recorded for the older-epoch digest"
+grep -q '"digest_skipped": "older than the bundle"' "$HOME/.claude/before-compact/status-t.json" || fail "the older-than-the-bundle skip was not recorded"
+# The same file rewritten now, after that bundle: this epoch's digest, injected.
+python3 - "$D" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({"at":sys.argv[2],"model":"haiku","chars":40,"turns":4,"text":"## Constraints and preferences\n- THIS EPOCH DIGEST"}))
+PY
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+[[ "$out" == "A digest of the dialog before the compaction, written by haiku from the last 4 turns:"* ]] || fail "a digest written after the bundle was not injected"
+grep -q "THIS EPOCH DIGEST" <<<"$out" || fail "this epoch's digest text is missing"
+grep -q '"digest_skipped": null' "$HOME/.claude/before-compact/status-t.json" || fail "an injected digest should record digest_skipped null"
 echo "all checks passed"

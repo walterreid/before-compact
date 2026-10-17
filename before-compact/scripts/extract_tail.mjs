@@ -185,20 +185,33 @@ function takeMarker(sessionId) {
 
 // The digest the mod writes (hooks/register.js, userConfig digest_in_precompact)
 // inside its classic.PreCompact hook, after this script's own PreCompact run:
-// { at, model, chars, turns, text, … }. Read, not consumed: the mod rewrites it
-// before every compaction while the flag is on, and one older than
-// DIGEST_MAX_AGE_MS is ignored, the same freshness rule as the bundle's.
+// { at, model, chars, turns, text, … }. Read, not consumed (the pane's Digest tab
+// reads the same file): the mod rewrites it before every compaction while the
+// flag is on. Two rules decide whether it belongs to THIS compaction:
+//   • fresher than DIGEST_MAX_AGE_MS (the bundle's own freshness rule);
+//   • written at or after the bundle this script's PreCompact hook wrote for
+//     this compaction (the mod's hook runs after this script's, so a digest of
+//     this epoch has `at` ≥ the bundle's mtime; one from an earlier compaction,
+//     left behind when the flag was turned off, is older than the bundle and
+//     would otherwise displace a compaction's worth of user turns with the
+//     wrong epoch's digest). A little slack for clock granularity. With no
+//     fresh bundle (the live-fallback path) the age rule stands alone.
 const DIGEST_MAX_AGE_MS = 15 * 60 * 1000;
 const DIGEST_MAX_CHARS = 4000; // of the hook's budget; the turns get the rest
+const DIGEST_BUNDLE_SLACK_MS = 5000;
 function digestPath(sessionId) {
   return join(homedir(), '.claude', 'before-compact', `digest-${sessionId || 'unknown'}.json`);
 }
-function readDigest(sessionId) {
+// { digest, skipped }: the digest to inject, or null with why it was passed over
+// ('stale', 'older than the bundle'); both null when there is no digest file.
+function readDigest(sessionId, bundleMtimeMs) {
   let d = null;
-  try { const p = digestPath(sessionId); if (!existsSync(p)) return null; d = JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
-  if (!d || typeof d.at !== 'string' || typeof d.text !== 'string' || !d.text.trim()) return null;
-  if (!(Date.now() - Date.parse(d.at) <= DIGEST_MAX_AGE_MS)) return null;
-  return d;
+  try { const p = digestPath(sessionId); if (!existsSync(p)) return { digest: null, skipped: null }; d = JSON.parse(readFileSync(p, 'utf8')); } catch { return { digest: null, skipped: null }; }
+  if (!d || typeof d.at !== 'string' || typeof d.text !== 'string' || !d.text.trim()) return { digest: null, skipped: null };
+  const at = Date.parse(d.at);
+  if (!(Date.now() - at <= DIGEST_MAX_AGE_MS)) return { digest: null, skipped: 'stale' };
+  if (bundleMtimeMs != null && !(at >= bundleMtimeMs - DIGEST_BUNDLE_SLACK_MS)) return { digest: null, skipped: 'older than the bundle' };
+  return { digest: d, skipped: null };
 }
 // The digest's share of the output: at most DIGEST_MAX_CHARS, cut with a note.
 function digestBlock(d, sessionId) {
@@ -409,7 +422,7 @@ if (HOOK) {
   if (event === 'SessionStart') {
     // Tier 2: print the bundle; Claude Code injects a SessionStart hook's stdout
     // as context. Prefer the PreCompact bundle if one is fresh for this session.
-    let text = null, origin = '';
+    let text = null, origin = '', bundleMtimeMs = null;
     const p = bundlePath(hook.session_id);
     // The mod already appended the turns itself (inject_in_mod): print nothing, so
     // they are not in the context twice, and say so in the status record.
@@ -425,6 +438,7 @@ if (HOOK) {
     try {
       if (existsSync(p) && Date.now() - statSync(p).mtimeMs < BUNDLE_MAX_AGE_MS) {
         text = readFileSync(p, 'utf8'); origin = 'prepared by the PreCompact hook';
+        bundleMtimeMs = statSync(p).mtimeMs;
       }
     } catch { /* fall through to live extraction */ }
     if (text === null) {
@@ -452,7 +466,7 @@ if (HOOK) {
     // DIGEST_MAX_CHARS, the turns the rest (the bundle was cut for the full budget
     // at PreCompact time, before the digest existed), oldest turns dropped first.
     // With no digest the output is exactly what it was.
-    const digest = readDigest(hook.session_id);
+    const { digest, skipped: digestSkipped } = readDigest(hook.session_id, bundleMtimeMs);
     let head = '', dropped = 0;
     if (digest) {
       head = digestBlock(digest, hook.session_id) + '\n\n';
@@ -467,7 +481,7 @@ if (HOOK) {
       chars: output.length, tokens_est: Math.round(output.length / 4), bundle: p, transcript: T,
       arc: arc ? arc.path : null, arc_turns: arc ? arc.turns : null, arc_chars: arc ? arc.chars : null, arc_tokens_est: arc ? arc.tokens : null,
       digest_chars: digest ? head.length : 0, digest_model: digest ? digest.model || null : null,
-      digest_turns: digest ? digest.turns ?? null : null, digest_dropped_turns: dropped,
+      digest_turns: digest ? digest.turns ?? null : null, digest_dropped_turns: dropped, digest_skipped: digestSkipped,
     });
     console.log(output);
     process.exit(0);

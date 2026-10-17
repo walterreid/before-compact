@@ -178,14 +178,26 @@ before the hook returns, so it is on disk before the engine summarizes. After th
 the SessionStart hook prints it first, under one factual line (*A digest of the dialog before
 the compaction, written by haiku from the last N turns:*), then your turns; the digest gets
 at most 4,000 of the 9,000-character budget and the turns the rest, oldest dropped first. A
-digest older than 15 minutes is ignored. Any failure (no answer, a refused request, a
-timeout at 120 s, a failed write) writes nothing, shows in the pane as `Digest ✗` and as the
-last error, and the compaction goes on.
+digest older than 15 minutes is ignored, and so is one older than the bundle the script's
+own PreCompact hook wrote for this compaction: the mod's hook runs after the script's, so a
+digest of this compaction is newer than the bundle, and one left behind by an earlier
+compaction (the flag turned off since) is not and must not displace this compaction's turns
+with the wrong epoch's digest. The status record says why one was skipped
+(`digest_skipped`: `stale`, `older than the bundle`, or null). Any failure (no answer, a
+refused request, a failed write) writes nothing, shows in the pane as `Digest ✗` and as the
+last error, and the compaction goes on. The call is made with `timeoutMs: 120000`, which
+the 2.1.299 API declarations (the file the plugin-authoring skill writes for this build)
+list on the request as "how long the whole call may take before it resolves `aborted`";
+the 2.1.277 declarations do not list it, and whether a live call honours it is unverified.
+If the field is ignored, the hook's own limits are what bound the call.
 
 **What it costs.** One model call per compaction, billed to your usage: up to ~15k tokens
 in (the 60,000 characters of dialog) and `digest_max_tokens` out, through Claude Code's own
 client. The model call's time does not count against the hook's budget, but it does add to
-how long the compaction takes (the row's duration does not include it; the Digest line does).
+how long the compaction takes. The row's duration most likely includes it: the digest runs
+inside `classic.PreCompact`, which this mod reads as running inside `session.compact`'s
+`next(e)`, the span the duration measures. That is unmeasured; the Digest line's own time is
+the call alone.
 
 **Read this before trusting it.**
 
@@ -199,6 +211,9 @@ how long the compaction takes (the row's duration does not include it; the Diges
   beside the bundle. Delete the directory to remove it.
 
 **The comparison protocol.** This is how to find out whether the digest earns its cost.
+Run the live protocol in `test/live-protocol.md` with the flag **off** first: the digest takes
+up to 4,000 of the 9,000 characters that would otherwise carry your turns, so a run with it
+on measures a different injection, not the same one plus a digest.
 
 1. In a session with real history, turn `digest_in_precompact` on, run `/compact`, and
    open `/before-compact`. Read tab 3 (the engine's summary) and tab 4 (the digest) side by
