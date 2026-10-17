@@ -333,6 +333,66 @@ test('inject_in_mod off (the default): the result is untouched and no marker is 
   await ui.unmount()
 })
 
+// --- the knob (userConfig summary_instructions) ----------------------------------
+// What these prove: what the stub standing in for the engine receives as the
+// event's instructions, with the knob set and with it empty. What they cannot
+// prove: how much a live summarizer honours the text. The Summary tab is for that.
+
+test('summary_instructions set: the engine receives the /compact text and the knob\'s text, joined by a newline', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  on('config.set', ($, e) => ({ value: e.value }))
+  const seen: any[] = []
+  on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 } })
+
+  await $.config.set({ key: 'before-compact.summary_instructions', value: '  Keep every file path and every command verbatim.  ' } as any)
+
+  // With text after /compact: the person's text first, the knob's on the next line.
+  const old = transcript(10)
+  const result = await $.session.compact({ trigger: 'manual', instructions: 'keep the plan', messages: old } as any)
+  expect(seen.length).toBe(1)
+  expect(seen[0].instructions).toBe('keep the plan\nKeep every file path and every command verbatim.')
+  // Everything else goes down as it came, and the result comes back untouched.
+  expect(seen[0].trigger).toBe('manual')
+  expect(seen[0].messages).toEqual(old)
+  expect(result).toEqual({ messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 })
+
+  // Without text after /compact: the knob's text alone, no leading newline.
+  await $.session.compact({ trigger: 'auto', messages: transcript(4) } as any)
+  expect(seen[1].instructions).toBe('Keep every file path and every command verbatim.')
+
+  // The rows show what the summarizer was told, not only what was typed.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan\nKeep every file path and every command verbatim\.$/ })).toBeDefined()
+  await ui.press({ key: 'tab-summary' })
+  expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: Keep every file path and every command verbatim\.$/ })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+
+  // Cleared again: the event goes down untouched.
+  await $.config.set({ key: 'before-compact.summary_instructions', value: '' } as any)
+  const e3 = { trigger: 'manual', instructions: 'just this', messages: transcript(4) }
+  await $.session.compact(e3 as any)
+  expect(seen[2].instructions).toBe('just this')
+})
+
+test('summary_instructions empty (the default): the engine receives the event untouched', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const seen: any[] = []
+  on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 } })
+
+  const withText = { trigger: 'manual', instructions: 'keep the plan', messages: transcript(6) }
+  await $.session.compact(withText as any)
+  expect(seen[0]).toMatchObject(withText)
+  expect(seen[0].instructions).toBe('keep the plan')
+
+  const without = { trigger: 'auto', messages: transcript(6) }
+  await $.session.compact(without as any)
+  expect(seen[1].instructions).toBeUndefined()
+  expect(seen[1]).toMatchObject(without)
+})
+
 test('a failed --probe shows the useful error line, not node\'s loader preamble', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HOME })

@@ -45,11 +45,12 @@ const STATUS_DIR = '.claude/before-compact' // relative to $HOME
 // register(on, options) seeds these from the manifest's userConfig (defaults
 // filled in); the config.set hook below keeps them current when the person flips
 // a row in /config, so no reload is needed for the change to apply.
-const DEFAULTS = { inject_in_mod: false, inject_turns: 8, inject_max_chars: 9000 }
+const DEFAULTS = { summary_instructions: '', inject_in_mod: false, inject_turns: 8, inject_max_chars: 9000 }
 let settings = { ...DEFAULTS }
 function readSettings(o) {
   const num = (v, d, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, Math.round(x))) : d }
   return {
+    summary_instructions: typeof o.summary_instructions === 'string' ? o.summary_instructions.trim() : '',
     inject_in_mod: o.inject_in_mod === true || o.inject_in_mod === 'true',
     inject_turns: num(o.inject_turns, DEFAULTS.inject_turns, 1, 50),
     inject_max_chars: num(o.inject_max_chars, DEFAULTS.inject_max_chars, 200, 100000),
@@ -320,7 +321,7 @@ export function register(on, options) {
 
   // A row flipped in /config: keep the module's copy current. (A change may also
   // reload the module, in which case register seeds the same value again.)
-  on('config.set', { key: /(^|\.)inject_(in_mod|turns|max_chars)$/ }, async ($, e, next) => {
+  on('config.set', { key: /(^|\.)(inject_(in_mod|turns|max_chars)|summary_instructions)$/ }, async ($, e, next) => {
     const r = await next(e)
     if (r && r.deny === undefined) settings = readSettings({ ...settings, [String(e.key).replace(/^.*\./, '')]: r.value })
     return r
@@ -353,9 +354,19 @@ export function register(on, options) {
   // next(e) is the whole compaction: the PreCompact settings hooks, the summary,
   // and the engine's token counts. Nothing is recorded for a precompute (its
   // result is parked, not installed) or for a compaction a hook vetoed.
+  //
+  // The knob (userConfig summary_instructions, empty by default): when set, the
+  // event goes down with the knob's text appended to the instructions, on its
+  // own line after whatever was typed after /compact, so the person's own text
+  // is kept. The types say next({ ...e, instructions }) changes what the
+  // summarizer is told; how much it honours that is not measured here. The
+  // Summary tab shows what came back.
   on('session.compact', async ($, e, next) => {
     const t0 = Date.now()
-    const result = await next(e)
+    const input = settings.summary_instructions
+      ? { ...e, instructions: [e.instructions, settings.summary_instructions].filter(Boolean).join('\n') }
+      : e
+    const result = await next(input)
     if (e.trigger === 'precompute') return result
     if (result.skip !== undefined) {
       // Vetoed: nothing was installed, so drop the entry PreCompact may have opened.
@@ -367,7 +378,7 @@ export function register(on, options) {
     const first = result.messages[0]
     const summaryText = first && typeof first.text === 'string' ? first.text : ''
     const numbers = {
-      trigger: e.trigger, agentId: e.agentId ?? null, instructions: e.instructions ?? null,
+      trigger: e.trigger, agentId: e.agentId ?? null, instructions: input.instructions ?? null,
       durationMs: Date.now() - t0,
       beforeTokens: result.tokensBefore ?? null, afterTokens: result.tokensAfter ?? null,
       beforeMessages: e.messages.length, afterMessages: result.messages.length,

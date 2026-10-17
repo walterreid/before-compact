@@ -1,6 +1,6 @@
 {
   "name": "before-compact",
-  "description": "Keeps your last turns, verbatim, across compaction. A PreCompact hook saves the last turns verbatim; a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane.",
+  "description": "Keeps your last turns, verbatim, across compaction. A PreCompact hook saves the last turns verbatim (and the full arc beside them); a SessionStart hook re-injects them after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane with the summary the engine installed.",
   "version": "0.2.0",
   "author": {
     "name": "Walter Reid",
@@ -10,6 +10,12 @@
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "summary_instructions": {
+      "type": "string",
+      "title": "Extra instructions for the compaction summarizer",
+      "description": "Off when empty (default). When set, the mod's session.compact hook appends this text, on its own line, to the instructions the summarizer is given, after anything typed after /compact. How much the summarizer honours instructions is documented to exist, not measured; the pane's Summary tab (3) is where to look.",
+      "default": ""
+    },
     "inject_in_mod": {
       "type": "boolean",
       "title": "Experiment: re-inject from the mod instead of the SessionStart hook",
