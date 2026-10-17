@@ -114,7 +114,7 @@ M="$HOME/.claude/before-compact/injected-t.json"
 printf '{"at":"%s","trigger":"manual","appended":5,"chars":1200}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$M"
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 [ -z "$out" ] || fail "SessionStart injected although the mod's marker said it had appended the turns"
-[ -e "$M" ] && fail "the stand-down marker was not consumed"
+[ -e "$M" ] || fail "the stand-down marker was deleted: it is read, not consumed, so the assistant-side hook can read it too"
 grep -q '"mod_appended": 5' "$HOME/.claude/before-compact/status-t.json" || fail "the stand-down was not recorded in the status file"
 # A stale marker (older than 2 minutes) is ignored and removed: the script injects as usual.
 printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":1200}' > "$M"
@@ -221,4 +221,93 @@ assert p["compactions"]==1 and p["boundary_source"]=="phrase", p
 assert m[0]["source"]=="phrase" and m[0]["preTokens"] is None and m[0]["preserved"] is None and m[0]["summary_chars"]>0, m
 ' || fail "--probe on a phrase-only transcript did not fall back"
 node "$S" --probe --file "$W/pre.jsonl" | grep -q '"compactions":0,"boundary_source":null' || fail "--probe on a transcript with no compaction is not empty"
+# ---- the assistant side: the second hook of each event (--side assistant), an injection of its own ----
+# The flags hooks.json passes. The digest file for session t is fresh at this point (THIS EPOCH DIGEST)
+# and the user bundle precompact-t.txt exists, so the checks below also prove the assistant side
+# leaves both alone.
+AS=(--hook --side assistant --role assistant --assistant-max 1500 --min-chars 200 --max-chars 9000)
+ST="$HOME/.claude/before-compact/status-t.json"
+AB="$W/data/precompact-t-assistant.txt"
+arcs_before=$(ls "$W/data" | grep -c '^arc-t-' || true)
+echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" "${AS[@]}" | grep -q . && fail "the assistant PreCompact printed to stdout"
+[ -s "$AB" ] || fail "the assistant PreCompact wrote no bundle (expected $AB)"
+[ -s "$W/data/precompact-t.txt" ] || fail "the user bundle is gone: the assistant side must not touch it"
+[ "$(ls "$W/data" | grep -c '^arc-t-' || true)" = "$arcs_before" ] || fail "the assistant PreCompact wrote an arc; only the user side writes one"
+grep -q "===== ASSISTANT" "$AB" || fail "the assistant bundle has no assistant turns"
+grep -q "===== USER" "$AB" && fail "the assistant bundle holds a user turn"
+python3 - "$ST" <<'PY' || fail "the assistant PreCompact status record is wrong (side, written, turns, no arc fields)"
+import json,sys; r=json.load(open(sys.argv[1]))[-1]
+assert r["event"]=="PreCompact" and r["side"]=="assistant" and r["written"] is True and r["turns"]>0 and r["tokens_est"]>0, r
+assert r["bundle"].endswith("precompact-t-assistant.txt") and "arc" not in r and "arc_chars" not in r, r
+assert r["min_chars"]==200 and r["assistant_max"]==1500, r
+PY
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
+[[ "$out" == "The following are the assistant's own prior turns from this same session, from just before the context was compacted (prepared by the PreCompact hook)."* ]] || fail "the assistant SessionStart output does not start with its own framing"
+grep -q "turns shorter than 200 characters were left out, and a turn longer than 1500 characters is cut" <<<"$out" || fail "the assistant framing does not state the min-chars and assistant-max rules"
+grep -q "===== ASSISTANT" <<<"$out" || fail "the assistant SessionStart output has no assistant turn"
+grep -q "===== USER" <<<"$out" && fail "the assistant SessionStart output holds a user turn"
+grep -q "LAST BEFORE COMPACTION" <<<"$out" && fail "the assistant SessionStart output holds the newest user turn's text"
+grep -q "is in $W/data/arc-" <<<"$out" && fail "the assistant SessionStart output has an arc pointer line; the user side prints it"
+grep -q "A digest of the dialog\|THIS EPOCH DIGEST" <<<"$out" && fail "the assistant SessionStart output has the digest block although the digest is fresh; the user side prints it"
+grep -q "^ok$" <<<"$out" && fail "the 2-char assistant turn 'ok' was not skipped by --min-chars 200"
+grep -q "^assistant 30 x" <<<"$out" || fail "the newest long assistant turn is missing from the assistant output"
+grep -q "chars truncated" <<<"$out" && fail "an 813-char assistant turn was cut under --assistant-max 1500"
+[ "$(wc -c <<<"$out")" -lt 9000 ] || fail "the assistant SessionStart output is not under 9000 chars"
+python3 - "$ST" <<'PY' || fail "the assistant SessionStart status record is wrong (side, injected, chars, tokens_est, origin)"
+import json,sys; r=json.load(open(sys.argv[1]))[-1]
+assert r["event"]=="SessionStart" and r["side"]=="assistant" and r["injected"] is True, r
+assert r["chars"]>0 and r["tokens_est"]>0 and r["origin"]=="prepared by the PreCompact hook", r
+assert "arc" not in r and "digest_chars" not in r, r
+PY
+# --assistant-max is live: at 300 the same 813-char turn is cut.
+echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --side assistant --role assistant --assistant-max 300 --min-chars 200 --max-chars 9000
+grep -q "chars truncated" "$AB" || fail "--assistant-max 300 did not cut the 813-char assistant turn"
+# assistant_turns off (CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=false): no bundle, no output, a record that says why.
+rm -f "$AB"
+echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact"}' | CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=false node "$S" "${AS[@]}" | grep -q . && fail "with assistant_turns off the assistant PreCompact printed"
+[ -e "$AB" ] && fail "with assistant_turns off the assistant PreCompact wrote a bundle"
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=false node "$S" "${AS[@]}")
+[ -z "$out" ] || fail "with assistant_turns off the assistant SessionStart printed something"
+python3 - "$ST" <<'PY' || fail "assistant_turns off was not recorded as injected:false with a reason"
+import json,sys; log=json.load(open(sys.argv[1])); r=log[-1]; q=log[-2]
+assert r["event"]=="SessionStart" and r["side"]=="assistant" and r["injected"] is False and r["origin"].startswith("off: the assistant_turns option is false"), r
+assert q["event"]=="PreCompact" and q["side"]=="assistant" and q["written"] is False and q["origin"].startswith("off"), q
+PY
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=false node "$S" --hook --role user)
+grep -q "prepared by the PreCompact hook" <<<"$out" || fail "assistant_turns off silenced the user side"
+# Any other value, like an absent variable, means on. No bundle now, so this is the assistant side's live
+# fallback: the turns before the boundary, no arc written, nothing from after the boundary.
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS=true node "$S" "${AS[@]}")
+grep -q "extracted from the transcript after compaction" <<<"$out" || fail "the assistant side did not fall back to the transcript"
+grep -q "^assistant 30 x" <<<"$out" || fail "the assistant fallback is missing the newest long assistant turn"
+grep -q "===== USER\|continuing" <<<"$out" && fail "the assistant fallback holds a user turn or a post-compaction turn"
+[ "$(ls "$W/data" | grep -c '^arc-t-' || true)" = "$arcs_before" ] || fail "the assistant side's fallback wrote an arc"
+# Both sides stand down on a fresh marker, and neither deletes it. Both bundles are rewritten first, so a
+# marker written after them is this compaction's.
+echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user --max-chars 9000
+echo '{"session_id":"t","transcript_path":"'"$W/pre.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" "${AS[@]}"
+printf '{"at":"%s","trigger":"manual","appended":4,"chars":900}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$M"
+out_u=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+out_a=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
+[ -z "$out_u" ] || fail "a fresh marker did not stand the user side down"
+[ -z "$out_a" ] || fail "a fresh marker did not stand the assistant side down"
+[ -e "$M" ] || fail "a side deleted the marker; it is read, not consumed"
+python3 - "$ST" <<'PY' || fail "the two stand-downs were not both recorded"
+import json,sys; log=json.load(open(sys.argv[1])); a,b=log[-2],log[-1]
+assert {a["side"],b["side"]}=={"user","assistant"}, (a,b)
+for r in (a,b): assert r["event"]=="SessionStart" and r["injected"] is False and r["origin"].startswith("stood down: the mod appended 4 user turns") and r["mod_appended"]==4, r
+PY
+# A marker from an EARLIER compaction, fresh by age (60 s) but older than this compaction's bundles, is
+# ignored by both sides: they inject, and the marker stays until it is stale.
+python3 - "$M" <<'PY'
+import json,sys,datetime
+at=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
+open(sys.argv[1],"w").write(json.dumps({"at":at,"trigger":"manual","appended":4,"chars":900}))
+PY
+out_u=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+out_a=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
+grep -q "prepared by the PreCompact hook" <<<"$out_u" || fail "a marker older than the bundle stood the user side down"
+grep -q "prepared by the PreCompact hook" <<<"$out_a" || fail "a marker older than the bundle stood the assistant side down"
+[ -e "$M" ] || fail "a marker that is fresh by age was removed"
+rm -f "$M"
 echo "all checks passed"

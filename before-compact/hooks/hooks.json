@@ -1,5 +1,5 @@
 {
-  "description": "Compaction recovery: prepare the last turns before compaction, re-inject them after.",
+  "description": "Compaction recovery: prepare the last turns before compaction, re-inject them after. Two entries per event: the user's turns (first) and the assistant's (second), each its own hook output under its own 10,000-character cap.",
   "modules": [
     "./register.js"
   ],
@@ -23,6 +23,31 @@
             "statusMessage": "Saving the last turns before compaction"
           }
         ]
+      },
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/extract_tail.mjs",
+              "--hook",
+              "--side",
+              "assistant",
+              "--role",
+              "assistant",
+              "--assistant-max",
+              "1500",
+              "--min-chars",
+              "200",
+              "--max-chars",
+              "9000"
+            ],
+            "timeout": 20,
+            "statusMessage": "Saving the assistant's last turns before compaction"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -42,6 +67,31 @@
             ],
             "timeout": 20,
             "statusMessage": "Restoring your voice from before compaction"
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/extract_tail.mjs",
+              "--hook",
+              "--side",
+              "assistant",
+              "--role",
+              "assistant",
+              "--assistant-max",
+              "1500",
+              "--min-chars",
+              "200",
+              "--max-chars",
+              "9000"
+            ],
+            "timeout": 20,
+            "statusMessage": "Restoring the assistant's turns from before compaction"
           }
         ]
       }

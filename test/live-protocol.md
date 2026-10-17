@@ -13,15 +13,34 @@ it from says which layer did the work:
 | Bin | The answer is | Reachable after compaction by |
 | --- | --- | --- |
 | **U** user-said | only in the user's own turns | the hook's injected bundle (user turns, ≤9,000 chars) |
-| **S** assistant-said | only in the assistant's replies | the arc file, a digest, or the engine summary if it kept it |
+| **S** assistant-said | only in the assistant's replies, deeper in the window | the arc file, a digest, or the engine summary if it kept it |
+| **A** assistant-said-restored | only in the assistant's last few replies before the compaction | the second hook's injected bundle (assistant turns, ≤9,000 chars, each cut at 1,500, those under 200 chars dropped), added 2026-10-16 |
 | **D** decision with its reason | in the dialog, as a change of mind and why | same as S; this is what summaries flatten most |
 | **F** in a file | CLAUDE.md or the README | anything; this is the control |
 
 Expected pattern if the layers work as designed: **F** right every time; **U** right cold,
-because the bundle put the turns back; **S** and **D** wrong or vague cold unless the
-engine's summary happened to keep them, and right once the arc file is read. A **U**
-question answered wrong cold means the bundle did not reach the model. An **S** question
-answered right cold means the summary kept more than we assume, which is also worth knowing.
+because the bundle put the turns back; **A** right cold too, because the second bundle put
+the assistant's last turns back, and the pair **U** right / **A** wrong is the signature of
+only one of the two hook outputs reaching the model; **S** and **D** wrong or vague cold
+unless the engine's summary happened to keep them, and right once the arc file is read. A
+**U** question answered wrong cold means the bundle did not reach the model. An **S**
+question answered right cold means the summary kept more than we assume, which is also
+worth knowing. **A** and **S** differ only in where the answer sits: within the last
+9,000 characters of the assistant's turns, or further back. On a session that compacts
+late, an **A** answer can age into an **S** answer before the compaction comes; record how
+many assistant turns before the boundary each **A** answer sat (the `[-N]` index in the
+second block) so the grade can be read against the bundle's reach.
+
+Bin **A** has two questions drawn from the assistant's own recent answers in the session
+that asked for the second injection, as that session relayed them when it briefed this
+change. Stage 1 is the only stage that measures the second block: the arc (stage 2) and
+`--recover --role both` (stage 3) hold the same answers, so a wrong-then-right **A** says
+the block did not arrive and a right-cold **A** says it did (or the summary kept it; the
+Summary tab, pressed before stage 1, settles which). Two more things a live run should
+record for **A**: whether the model, asked which of the two blocks of prior turns came first
+in its context, names an order (the hooks reference says Claude receives all the values and
+does not say in which order), and whether `/context` shows the two blocks' sizes adding up
+with no combined cap applied.
 
 It cannot prove the restored text *caused* a correct answer; a model can answer from
 general competence. That is why each bin has several questions and why **F** is there.
@@ -31,12 +50,15 @@ outside the repository before compaction.
 
 ## Procedure
 
-1. **Before compaction:** confirm the pane shows three tabs and no error line. Note the
+1. **Before compaction:** confirm the pane shows four tabs and no error line. Note the
    gauge. Do not discuss these questions with the model again.
 2. **At compaction:** let auto-compaction run, or type `/compact`. Then open
    `/before-compact` and record the row: tokens before → after, messages before → after,
-   duration, the two marks (✓ / ✗ / ?), and whether an error line appeared. Press `3` and
-   note the summary's size. Press `2` and note how many user turns the bundle holds.
+   duration, the three marks (✓ / ✗ / ? / –; the third is the assistant side's second
+   `SessionStart` line), and whether an error line appeared. Press `3` and note the
+   summary's size. Press `2` and note how many user turns the bundle holds. Note the
+   assistant line's token figure: it is the size of the second block as printed, not proof
+   that the model received it.
 3. **Stage 1, cold:** paste the questions below, one message, with this preface verbatim:
    *"Answer each from memory only. Do not read any file or run any tool. If you do not
    know, say so."* Grade each: right, partly, wrong, said-unknown.
@@ -70,6 +92,14 @@ outside the repository before compaction.
 - S4. Across the user's past compactions on this machine, what was the median token count
   after compaction, and the median number of entries the engine preserved?
 - S5. How long did the summary take, at the median, across those past compactions?
+
+**A, assistant-said-restored** (the assistant's own recent answers; added 2026-10-16)
+
+- A1. When the assistant measured its own side of the dialog against the 9,000-character
+  budget, how many full assistant turns fit, and how many fit when each turn was cut at
+  1,200 characters and at 700?
+- A2. In that measurement, what range of lengths did the assistant's turns span, and what
+  did the assistant say the long ones have in common?
 
 **D, decisions with their reason**
 
@@ -121,6 +151,14 @@ turns), across 56 automatic compactions that all began near 971k tokens.
 **S5.** About two minutes (median 122 seconds); three of 56 installed in under a second
 from a precompute.
 
+**A1.** 7 full turns (about 1,800 tokens); 11 turns cut at 1,200 characters; 17 cut at
+700. (Sealed 2026-10-16 from the brief the measuring session gave the session that built
+the second injection; the measurement itself was made in the measuring session's own
+recent turns, which is what makes it an **A** answer there.)
+
+**A2.** From one-line progress notes to about 4,800 characters; the long ones lead with
+the conclusion. (Same source and date as A1.)
+
 **D1.** A CLAUDE.md at the plugin root is not loaded as context and fails
 `claude plugin validate --strict`; nesting let the repo root hold CLAUDE.md and `test/`
 without shipping them in the plugin. `.claude/CLAUDE.md` would also have passed strict
@@ -166,10 +204,13 @@ Fill in after the first run.
 | Pane row (tokens, messages, duration, marks) | |
 | Summary size (tab 3) | |
 | Bundle turns (tab 2) | |
-| Stage 1 grid (U/S/D/F right-partly-wrong-unknown) | |
+| Assistant line (tokens; ✓ / ✗ / ? / –) | |
+| Stage 1 grid (U/S/A/D/F right-partly-wrong-unknown) | |
 | Stage 2 grid | |
 | Stage 3 grid | |
 | Did the model know the arc file's name cold? | |
+| Did the model quote both blocks' framings, and in which order did it say they came? | |
+| Did `/context` show both blocks, with no combined cap? | |
 
 ## Baseline: what a stock compaction kept, measured on a past session
 

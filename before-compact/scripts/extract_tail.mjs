@@ -34,6 +34,21 @@
 //      the whole output (framing, pointer line, turns, stats), under Claude Code's
 //      10,000-char cap on injected hook output.
 //
+//      --side user|assistant (hook mode; default user) picks WHICH SIDE of the dialog
+//      this run handles. hooks.json runs the script twice per event, once per side,
+//      so the two sides are two independent hook outputs, each under its own cap:
+//        user       bundle precompact-<session>.txt; writes the arc; prints the arc
+//                   pointer line and, when fresh, the digest block.
+//        assistant  bundle precompact-<session>-assistant.txt; no arc, no pointer
+//                   line, no digest; its own factual framing. Skipped entirely when
+//                   the plugin option assistant_turns is off (read from the
+//                   environment Claude Code exports, CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS;
+//                   absent means the default, on).
+//      --min-chars N skips turns shorter than N characters (default 0). The assistant
+//      hook passes 200 so one-line progress notes are left out; --assistant-max 1500
+//      keeps the lead of each longer turn. Both sides honour the inject_in_mod
+//      stand-down marker; neither deletes it (see peekMarker).
+//
 // WHERE THE CONVERSATION LIVES (manual mode only):
 //   ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl, where <encoded-cwd> is
 //   the absolute working directory with every "/" and " " turned into "-". This
@@ -58,15 +73,18 @@ function flag(name, def) {
 }
 if (flag('help', false)) {
   console.log('extract_tail.mjs — see the comment header of this file for full usage.');
-  console.log('Common: --turns N | --role user|assistant|both | --assistant-max CHARS | --max-chars CHARS | --raw | --recover | --file PATH | --hook');
+  console.log('Common: --turns N | --role user|assistant|both | --assistant-max CHARS | --min-chars CHARS | --max-chars CHARS | --raw | --recover | --file PATH | --hook [--side user|assistant]');
   process.exit(0);
 }
 const HOOK        = Boolean(flag('hook', false));                    // read hook JSON from stdin
+const SIDE        = String(flag('side', 'user')).toLowerCase();      // hook mode: user | assistant (which side's bundle this run is)
 const TURNS       = Number(flag('turns', 60));
-const ROLE        = String(flag('role', 'both')).toLowerCase();      // both | user | assistant
-const ASSIST_MAX  = Number(flag('assistant-max', 700));              // chars per assistant turn; 0 = header only
+const ROLE        = String(flag('role', SIDE === 'assistant' ? 'assistant' : 'both')).toLowerCase(); // both | user | assistant
+const ASSIST_MAX  = Number(flag('assistant-max', SIDE === 'assistant' ? 1500 : 700)); // chars per assistant turn; 0 = header only
 const USER_MAX    = Number(flag('user-max', 0)) || Infinity;         // chars per user turn; 0/omitted = unlimited
+const MIN_CHARS   = Number(flag('min-chars', 0)) || 0;               // skip turns shorter than this (after noise is stripped)
 const MAX_CHARS   = Number(flag('max-chars', HOOK ? 9000 : 0)) || Infinity; // total budget; 0 = unlimited
+if (SIDE !== 'user' && SIDE !== 'assistant') { console.error(`extract_tail: --side must be user or assistant, not "${SIDE}"`); process.exit(HOOK ? 0 : 1); }
 const RAW         = Boolean(flag('raw', false));                     // verbatim: no truncation, no noise-stripping
 let   RECOVER     = Boolean(flag('recover', false));                 // recover the turns before the last compaction
 const FILE_OVR    = flag('file', null);
@@ -87,8 +105,20 @@ if (HOOK) {
 function dataDir() {
   return resolve(process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), 'before-compact'));
 }
-function bundlePath(sessionId) {
-  return join(dataDir(), `precompact-${sessionId || 'unknown'}.txt`);
+// One bundle per side. The user side keeps the original name, so nothing that
+// existed before the assistant side was added has moved.
+function bundlePath(sessionId, side = 'user') {
+  return join(dataDir(), `precompact-${sessionId || 'unknown'}${side === 'assistant' ? '-assistant' : ''}.txt`);
+}
+// The plugin option assistant_turns (plugin.json userConfig, boolean, default true),
+// as Claude Code exports it to hook processes: CLAUDE_PLUGIN_OPTION_<KEY>, the key
+// uppercased (plugins reference, "Reference a saved value"). Whether the DEFAULT is
+// exported when the person never set the option, and how a boolean is spelled, the
+// reference does not say; so an absent or empty variable means the default (on), and
+// only an explicit false/0/off/no turns the side off.
+function assistantOn() {
+  const v = String(process.env.CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS ?? '').trim().toLowerCase();
+  return !(v === 'false' || v === '0' || v === 'off' || v === 'no');
 }
 // The arc: the back-and-forth of the CURRENT WINDOW (the turns after the most
 // recent compaction boundary in the transcript; the whole transcript when there
@@ -99,7 +129,7 @@ function bundlePath(sessionId) {
 function arcPath(sessionId, n) {
   return join(dataDir(), `arc-${sessionId || 'unknown'}-${n}.txt`);
 }
-const ARC = { role: 'both', assistMax: Infinity, userMax: Infinity, maxChars: Infinity, turns: Infinity, window: true };
+const ARC = { role: 'both', assistMax: Infinity, userMax: Infinity, minChars: 0, maxChars: Infinity, turns: Infinity, window: true };
 const BUNDLE_MAX_AGE_MS = 15 * 60 * 1000; // a PreCompact bundle older than this is stale
 // In hook mode the budget covers the whole printed output. The framing sentence,
 // the pointer line and the stats line are fixed text around the turns; reserve
@@ -167,19 +197,31 @@ function recordStatus(sessionId, entry) {
 // when it has itself appended the last user turns after the summary. It is written
 // inside the mod's session.compact hook, before that hook returns, and Claude Code
 // fires SessionStart(compact) only after the compaction result is in hand; so when
-// this script runs for that compaction the marker is already on disk. Consumed on
-// read, and ignored when older than MARKER_MAX_AGE_MS, so a marker left behind by a
-// compaction whose SessionStart hook never ran cannot silence the next one.
+// this script runs for that compaction the marker is already on disk.
+//
+// Read, NOT consumed. Two SessionStart hooks read it now (one per side), and the
+// hooks reference does not say in which order several hooks for one event run; a
+// marker that the first reader deleted would be missed by the second, which would
+// then inject. So neither side deletes a marker it honours. Which compaction a marker
+// belongs to is decided the way the digest's is (readDigest): it is this
+// compaction's when its `at` is at or after this side's bundle mtime (the mod writes
+// it after the PreCompact hooks have written both bundles), with a little slack; an
+// older one, left behind by an earlier compaction, is ignored. Where no fresh bundle
+// exists (the live-fallback path) the age rule stands alone. A marker older than
+// MARKER_MAX_AGE_MS is stale: ignored and removed, so one left behind by a
+// compaction whose SessionStart hooks never ran cannot silence a later one.
 const MARKER_MAX_AGE_MS = 2 * 60 * 1000;
+const MARKER_BUNDLE_SLACK_MS = 5000;
 function markerPath(sessionId) {
   return join(homedir(), '.claude', 'before-compact', `injected-${sessionId || 'unknown'}.json`);
 }
-function takeMarker(sessionId) {
+function peekMarker(sessionId, bundleMtimeMs) {
   const p = markerPath(sessionId);
   let m = null;
   try { if (!existsSync(p)) return null; m = JSON.parse(readFileSync(p, 'utf8')); } catch { m = null; }
-  try { unlinkSync(p); } catch { /* best effort */ }
-  if (!m || typeof m.at !== 'string' || !(Date.now() - Date.parse(m.at) <= MARKER_MAX_AGE_MS)) return null;
+  const at = m && typeof m.at === 'string' ? Date.parse(m.at) : NaN;
+  if (!(Date.now() - at <= MARKER_MAX_AGE_MS)) { try { unlinkSync(p); } catch { /* best effort */ } return null; }
+  if (bundleMtimeMs != null && !(at >= bundleMtimeMs - MARKER_BUNDLE_SLACK_MS)) return null; // an earlier compaction's
   return m;
 }
 
@@ -356,6 +398,7 @@ const markerIndices = (lines) => findBoundaries(lines).map((b) => b.index);
 function extract(T, o = {}) {
   const turns = o.turns ?? TURNS, role = o.role ?? ROLE, assistMax = o.assistMax ?? ASSIST_MAX;
   const userMax = o.userMax ?? USER_MAX, maxChars = o.maxChars ?? MAX_CHARS, reserve = o.reserve ?? 0;
+  const minChars = o.minChars ?? MIN_CHARS;
   const lines = readFileSync(T, 'utf8').split('\n').filter(Boolean);
   const bounds = findBoundaries(lines);
   const marks = bounds.map((b) => b.index);
@@ -404,6 +447,7 @@ function extract(T, o = {}) {
     let txt = stripNoise(textOf(content));
     if (!txt) continue;
     if (!RAW && summaries.has(i)) continue;               // the injected summary, not a real turn
+    if (txt.length < minChars) continue;                   // --min-chars: a progress line, not a turn worth the budget
     txt = truncate(txt, who === 'USER' ? userMax : assistMax);
     txt = txt || '(omitted — assistant-max 0)';
     const cost = txt.length + 40;                          // + per-turn header overhead
@@ -461,63 +505,110 @@ if (HOOK) {
   const event = hook.hook_event_name;
   const T = pickTranscript();
 
+  // Every record names its side, so the mod can tell the assistant side's records
+  // from the user side's (hooks/register.js, fold). The arc, the pointer line and the
+  // digest belong to the user side alone: one arc per compaction, one pointer, and a
+  // digest that sits ahead of the user's turns.
+  const ASSISTANT = SIDE === 'assistant';
+  const p = bundlePath(hook.session_id, SIDE);
+  const base = { side: SIDE, bundle: p, transcript: T };
+
   if (event === 'PreCompact') {
+    if (ASSISTANT && !assistantOn()) {
+      // The option is off: nothing saved, and the record says why.
+      recordStatus(hook.session_id, { event: 'PreCompact', ...base, trigger: hook.trigger || null, written: false, turns: 0, chars: 0, tokens_est: 0, origin: 'off: the assistant_turns option is false' });
+      process.exit(0);
+    }
     // Tier 3: write the bundle while the transcript is still intact. Nothing to
-    // print — PreCompact stdout is not shown to Claude. Beside it, the arc: the
-    // same transcript with both roles and nothing cut, for the model to read on
-    // demand (the SessionStart output names the file; it is never injected).
+    // print — PreCompact stdout is not shown to Claude. Beside it (user side only),
+    // the arc: the same transcript with both roles and nothing cut, for the model to
+    // read on demand (the SessionStart output names the file; it is never injected).
     const out = extract(T, { reserve: HOOK_RESERVE });
-    const p = bundlePath(hook.session_id);
     const written = writeExtract(p, out) != null;
-    const arc = extract(T, ARC);
-    const a = arcPath(hook.session_id, arc.epoch);
-    const arcChars = writeExtract(a, arc);
-    recordStatus(hook.session_id, {
-      event: 'PreCompact', trigger: hook.trigger || null, written, bundle: p,
+    const rec = {
+      event: 'PreCompact', ...base, trigger: hook.trigger || null, written,
       turns: out.count, chars: out.body.length, tokens_est: Math.round(out.body.length / 4),
-      arc: a, arc_written: arcChars != null, arc_turns: arc.count,
-      arc_chars: arcChars ?? 0, arc_tokens_est: arc.tokens,
-      transcript: T,
-    });
+    };
+    if (!ASSISTANT) {
+      const arc = extract(T, ARC);
+      const a = arcPath(hook.session_id, arc.epoch);
+      const arcChars = writeExtract(a, arc);
+      Object.assign(rec, { arc: a, arc_written: arcChars != null, arc_turns: arc.count, arc_chars: arcChars ?? 0, arc_tokens_est: arc.tokens });
+    } else {
+      Object.assign(rec, { min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null });
+    }
+    recordStatus(hook.session_id, rec);
     process.exit(0);
   }
 
   if (event === 'SessionStart') {
+    const src = { event: 'SessionStart', ...base, source: hook.source || null };
+    if (ASSISTANT && !assistantOn()) {
+      recordStatus(hook.session_id, { ...src, injected: false, origin: 'off: the assistant_turns option is false' });
+      process.exit(0);
+    }
     // Tier 2: print the bundle; Claude Code injects a SessionStart hook's stdout
     // as context. Prefer the PreCompact bundle if one is fresh for this session.
     let text = null, origin = '', bundleMtimeMs = null;
-    const p = bundlePath(hook.session_id);
-    // The mod already appended the turns itself (inject_in_mod): print nothing, so
-    // they are not in the context twice, and say so in the status record.
-    const stood = takeMarker(hook.session_id);
-    if (stood) {
-      recordStatus(hook.session_id, {
-        event: 'SessionStart', source: hook.source || null, injected: false,
-        origin: `stood down: the mod appended ${stood.appended} user turns after the summary`,
-        mod_appended: stood.appended ?? null, mod_chars: stood.chars ?? null, bundle: p, transcript: T,
-      });
-      process.exit(0);
-    }
     try {
       if (existsSync(p) && Date.now() - statSync(p).mtimeMs < BUNDLE_MAX_AGE_MS) {
         text = readFileSync(p, 'utf8'); origin = 'prepared by the PreCompact hook';
         bundleMtimeMs = statSync(p).mtimeMs;
       }
     } catch { /* fall through to live extraction */ }
+    // The mod already appended the turns itself (inject_in_mod): print nothing, so
+    // they are not in the context twice, and say so in the status record. Both
+    // sides stand down on the same marker; neither deletes it.
+    const stood = peekMarker(hook.session_id, bundleMtimeMs);
+    if (stood) {
+      recordStatus(hook.session_id, {
+        ...src, injected: false,
+        origin: `stood down: the mod appended ${stood.appended} user turns after the summary`,
+        mod_appended: stood.appended ?? null, mod_chars: stood.chars ?? null,
+      });
+      process.exit(0);
+    }
     if (text === null) {
       RECOVER = true;
       const out = extract(T, { reserve: HOOK_RESERVE });
-      if (!out.count) process.exit(0);                     // nothing worth injecting
+      if (!out.count) {                                    // nothing worth injecting
+        recordStatus(hook.session_id, { ...src, injected: false, origin: 'nothing to inject: no turns found in the transcript' });
+        process.exit(0);
+      }
       text = `${out.body}\n\n${out.stats}`; origin = 'extracted from the transcript after compaction';
       // No PreCompact hook ran, so no arc either: write one for the window just
-      // closed (RECOVER is on, so the window ends at the new boundary).
-      const arcOut = extract(T, ARC);
-      writeExtract(arcPath(hook.session_id, arcOut.epoch), arcOut);
+      // closed (RECOVER is on, so the window ends at the new boundary). User side
+      // only; the assistant side writes no arc on any path.
+      if (!ASSISTANT) {
+        const arcOut = extract(T, ARC);
+        writeExtract(arcPath(hook.session_id, arcOut.epoch), arcOut);
+      }
+    }
+    // Factual framing, not an instruction: text that reads as an out-of-band command
+    // can trip prompt-injection defenses and get surfaced instead of used.
+    if (ASSISTANT) {
+      // The assistant's own turns: one block of their own, under their own cap; the
+      // user side's hook prints the user's turns, the pointer line and the digest.
+      const cuts = [
+        MIN_CHARS > 0 ? `turns shorter than ${MIN_CHARS} characters were left out` : '',
+        isFinite(ASSIST_MAX) && ASSIST_MAX > 0 ? `a turn longer than ${ASSIST_MAX} characters is cut after its first ${ASSIST_MAX}` : '',
+      ].filter(Boolean).join(', and ');
+      const framing =
+        `The following are the assistant's own prior turns from this same session, from just before ` +
+        `the context was compacted (${origin}). They are what the assistant concluded and reported ` +
+        `at each step, which the compaction summary condensed; the user's own turns from the same ` +
+        `stretch are a separate block. Oldest to newest; the [-N] index counts back from the most ` +
+        `recent turn${cuts ? `; ${cuts}` : ''}.\n`;
+      const output = `${framing}${text}`;
+      recordStatus(hook.session_id, {
+        ...src, origin, injected: true, chars: output.length, tokens_est: Math.round(output.length / 4),
+        min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null,
+      });
+      console.log(output);
+      process.exit(0);
     }
     // The arc the PreCompact hook (or the fallback above) left beside the bundle.
     const arc = arcInfo(hook.session_id);
-    // Factual framing, not an instruction: text that reads as an out-of-band command
-    // can trip prompt-injection defenses and get surfaced instead of used.
     const turnsFraming =
       `The following are verbatim prior turns from this same session, from just before ` +
       `the context was compacted (${origin}). They preserve the user's voice and the ` +
@@ -540,8 +631,8 @@ if (HOOK) {
     }
     const output = `${head}${turnsFraming}${pointer}${text}`;
     recordStatus(hook.session_id, {
-      event: 'SessionStart', source: hook.source || null, origin, injected: true,
-      chars: output.length, tokens_est: Math.round(output.length / 4), bundle: p, transcript: T,
+      ...src, origin, injected: true,
+      chars: output.length, tokens_est: Math.round(output.length / 4),
       arc: arc ? arc.path : null, arc_turns: arc ? arc.turns : null, arc_chars: arc ? arc.chars : null, arc_tokens_est: arc ? arc.tokens : null,
       digest_chars: digest ? head.length : 0, digest_model: digest ? digest.model || null : null,
       digest_turns: digest ? digest.turns ?? null : null, digest_dropped_turns: dropped, digest_skipped: digestSkipped,
@@ -561,6 +652,6 @@ console.log(out.body);
 console.log(`\n\n${out.stats}`);
 console.log(
   `[knobs: --turns ${TURNS} --role ${ROLE} --assistant-max ${ASSIST_MAX}` +
-  `${isFinite(USER_MAX) ? ' --user-max ' + USER_MAX : ''}${isFinite(MAX_CHARS) ? ' --max-chars ' + MAX_CHARS : ''}${RAW ? ' --raw' : ''}` +
+  `${isFinite(USER_MAX) ? ' --user-max ' + USER_MAX : ''}${MIN_CHARS ? ' --min-chars ' + MIN_CHARS : ''}${isFinite(MAX_CHARS) ? ' --max-chars ' + MAX_CHARS : ''}${RAW ? ' --raw' : ''}` +
   `  ·  tip: --role user for the cheapest voice sample]`
 );
