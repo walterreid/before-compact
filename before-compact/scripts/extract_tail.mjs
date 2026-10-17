@@ -183,6 +183,48 @@ function takeMarker(sessionId) {
   return m;
 }
 
+// The digest the mod writes (hooks/register.js, userConfig digest_in_precompact)
+// inside its classic.PreCompact hook, after this script's own PreCompact run:
+// { at, model, chars, turns, text, … }. Read, not consumed: the mod rewrites it
+// before every compaction while the flag is on, and one older than
+// DIGEST_MAX_AGE_MS is ignored, the same freshness rule as the bundle's.
+const DIGEST_MAX_AGE_MS = 15 * 60 * 1000;
+const DIGEST_MAX_CHARS = 4000; // of the hook's budget; the turns get the rest
+function digestPath(sessionId) {
+  return join(homedir(), '.claude', 'before-compact', `digest-${sessionId || 'unknown'}.json`);
+}
+function readDigest(sessionId) {
+  let d = null;
+  try { const p = digestPath(sessionId); if (!existsSync(p)) return null; d = JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
+  if (!d || typeof d.at !== 'string' || typeof d.text !== 'string' || !d.text.trim()) return null;
+  if (!(Date.now() - Date.parse(d.at) <= DIGEST_MAX_AGE_MS)) return null;
+  return d;
+}
+// The digest's share of the output: at most DIGEST_MAX_CHARS, cut with a note.
+function digestBlock(d, sessionId) {
+  const t = d.text.trim();
+  const body = t.length <= DIGEST_MAX_CHARS ? t : t.slice(0, DIGEST_MAX_CHARS) + `\n…[digest cut at ${DIGEST_MAX_CHARS} of ${t.length} chars; the whole is in ${digestPath(sessionId)}]`;
+  const framing = `A digest of the dialog before the compaction, written by ${d.model || 'a model'} from the last ${d.turns ?? '?'} turns:`;
+  return `${framing}\n${body}`;
+}
+// Drop the oldest turns of a bundle until it fits `budget`: the bundle is the
+// per-turn sections extract() wrote, each opened by "\n===== ROLE  [-N] =====",
+// followed by its stats line(s), so cutting leading sections keeps the newest
+// turns, their [-N] indices and the stats. The stats then overstate the turn
+// count, which the appended note says. Sizes here are UTF-8 bytes, never fewer
+// than characters, so the output is under the budget whichever the cap counts.
+const bytes = (t) => Buffer.byteLength(t, 'utf8');
+function trimBundle(text, budget) {
+  if (bytes(text) <= budget) return { text, dropped: 0 };
+  const parts = text.split(/\n(?=={5} )/); // split ahead of each "===== ROLE  [-N] =====" line, so each turn keeps its header
+  const note = (n) => `\n[budget: the digest took ${DIGEST_MAX_CHARS} chars; the ${n} oldest turn(s) of the bundle were dropped]`;
+  let dropped = 0;
+  while (parts.length > 1 && bytes(parts.join('\n')) + bytes(note(dropped + 1)) > budget) { parts.shift(); dropped++; }
+  let out = parts.join('\n');
+  while (bytes(out) + bytes(note(dropped)) > budget && out.length) out = out.slice(0, -1); // one turn still too long: cut it
+  return { text: out + note(dropped), dropped };
+}
+
 // ---- locate the transcript -------------------------------------------------
 const projectsRoot = () => join(homedir(), '.claude', 'projects');
 const encodedCwd = () => process.cwd().replace(/[/ ]/g, '-');
@@ -399,15 +441,33 @@ if (HOOK) {
     const arc = arcInfo(hook.session_id);
     // Factual framing, not an instruction: text that reads as an out-of-band command
     // can trip prompt-injection defenses and get surfaced instead of used.
-    const output =
+    const turnsFraming =
       `The following are verbatim prior turns from this same session, from just before ` +
       `the context was compacted (${origin}). They preserve the user's voice and the ` +
       `exact last steps that the compaction summary flattened. Oldest to newest; the ` +
-      `[-N] index counts back from the most recent turn.\n${pointerLine(arc)}${text}`;
+      `[-N] index counts back from the most recent turn.\n`;
+    const pointer = pointerLine(arc);
+    // The digest experiment: a fresh digest goes first, under its own factual line,
+    // and the whole output stays under the budget: the digest gets at most
+    // DIGEST_MAX_CHARS, the turns the rest (the bundle was cut for the full budget
+    // at PreCompact time, before the digest existed), oldest turns dropped first.
+    // With no digest the output is exactly what it was.
+    const digest = readDigest(hook.session_id);
+    let head = '', dropped = 0;
+    if (digest) {
+      head = digestBlock(digest, hook.session_id) + '\n\n';
+      if (isFinite(MAX_CHARS)) {
+        const room = Math.max(0, MAX_CHARS - bytes(head) - bytes(turnsFraming) - bytes(pointer));
+        ({ text, dropped } = trimBundle(text, room));
+      }
+    }
+    const output = `${head}${turnsFraming}${pointer}${text}`;
     recordStatus(hook.session_id, {
       event: 'SessionStart', source: hook.source || null, origin, injected: true,
       chars: output.length, tokens_est: Math.round(output.length / 4), bundle: p, transcript: T,
       arc: arc ? arc.path : null, arc_turns: arc ? arc.turns : null, arc_chars: arc ? arc.chars : null, arc_tokens_est: arc ? arc.tokens : null,
+      digest_chars: digest ? head.length : 0, digest_model: digest ? digest.model || null : null,
+      digest_turns: digest ? digest.turns ?? null : null, digest_dropped_turns: dropped,
     });
     console.log(output);
     process.exit(0);

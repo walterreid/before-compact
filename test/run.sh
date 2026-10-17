@@ -98,4 +98,40 @@ printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":120
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 grep -q "prepared by the PreCompact hook" <<<"$out" || fail "a stale marker suppressed the injection"
 [ -e "$M" ] && fail "the stale marker was not removed"
+# digest_in_precompact: a fresh digest file from the mod goes first, under its factual line, and the whole output stays under 9000 chars.
+D="$HOME/.claude/before-compact/digest-t.json"
+python3 - "$D" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({"at":sys.argv[2],"model":"haiku","chars":4500,"turns":12,"text":"## Constraints and preferences\n- \"no pushes\"\n"+("digest line\n"*400)}))
+PY
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+[[ "$out" == "A digest of the dialog before the compaction, written by haiku from the last 12 turns:"* ]] || fail "output with a digest does not start with the digest framing"
+grep -q '"no pushes"' <<<"$out" || fail "the digest text was not printed"
+grep -q "digest cut at 4000" <<<"$out" || fail "a 4500-char digest was not cut to 4000"
+grep -q "prepared by the PreCompact hook" <<<"$out" || fail "the turns were not printed after the digest"
+grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "the newest user turn is missing after the digest"
+[ "$(wc -c <<<"$out")" -lt 9000 ] || fail "output with a digest is not under 9000 chars"
+grep -q '"digest_chars": 4' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars not recorded in the status record"
+# A bundle that would overflow with the digest in front: the oldest turns go, the newest stays, still under 9000.
+echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role both >/dev/null
+[ "$(wc -c < "$W/data/precompact-t.txt")" -gt 5000 ] || fail "the --role both bundle is too small to test trimming"
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role both)
+[ "$(wc -c <<<"$out")" -lt 9000 ] || fail "output with a digest and a full bundle is not under 9000 chars"
+grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "trimming dropped the newest turn"
+grep -q "oldest turn(s) of the bundle were dropped" <<<"$out" || fail "trimming left no note"
+grep -q "user turn 1$" <<<"$out" && fail "trimming kept the oldest turn"
+# A stale digest (older than 15 minutes) is ignored: the output is what it is without one.
+python3 - "$D" <<'PY'
+import json,sys
+open(sys.argv[1],"w").write(json.dumps({"at":"2020-01-01T00:00:00Z","model":"haiku","chars":10,"turns":2,"text":"old digest"}))
+PY
+echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user >/dev/null
+out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+grep -q "A digest of the dialog" <<<"$out" && fail "a stale digest was injected"
+[[ "$out" == "The following are verbatim prior turns"* ]] || fail "without a fresh digest the output changed"
+# No digest file at all: unchanged too.
+rm -f "$D"
+out2=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
+[ "$out" == "$out2" ] || fail "output without a digest file differs from output with a stale one"
+grep -q '"digest_chars": 0' "$HOME/.claude/before-compact/status-t.json" || fail "digest_chars 0 not recorded when no digest was injected"
 echo "all checks passed"
