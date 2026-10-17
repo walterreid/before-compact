@@ -8,6 +8,7 @@
   },
   "repository": "https://github.com/walterreid/before-compact",
   "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "types": "./types/index.d.ts",
   "userConfig": {
     "summary_instructions": {

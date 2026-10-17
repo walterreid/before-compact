@@ -1,0 +1,18 @@
+{
+  "name": "walterreid-plugins",
+  "description": "Claude Code plugins by Walter Reid. before-compact keeps your last turns, verbatim, across a compaction, and shows what each compaction did.",
+  "owner": {
+    "name": "Walter Reid",
+    "email": "walterreid@gmail.com",
+    "url": "https://github.com/walterreid"
+  },
+  "plugins": [
+    {
+      "name": "before-compact",
+      "source": "./before-compact",
+      "description": "Keeps your last turns, verbatim, across a Claude Code compaction: a PreCompact hook saves them and the window's full arc, a SessionStart hook puts them back, and the /before-compact pane shows each compaction's numbers, the engine's summary, and what was re-injected.",
+      "category": "context",
+      "tags": ["compact", "compaction", "context-window", "memory", "mod"]
+    }
+  ]
+}

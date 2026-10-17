@@ -265,10 +265,19 @@ a better prompt, unmeasured.
 ## Install
 
 Needs Node 18+ on `PATH`. The plugin is the `before-compact/` folder of this repo; the repo
-root holds the tests and the dev notes.
+root holds the tests, the dev notes, and a marketplace file that lists the plugin.
+
+From the marketplace, in a Claude Code session (2.1.275 or later):
+
+    /plugin install before-compact --marketplace walterreid/before-compact
+
+or in two steps, `/plugin marketplace add walterreid/before-compact` then
+`/plugin install before-compact@walterreid-plugins`. That installs a copy; to develop
+against this repo instead, load it in place:
 
 For every session, in the terminal and the Desktop app, point Claude Code at the folder from
-`~/.claude/settings.json` (needs Claude Code 2.1.280 or later; the pane needs 2.1.287):
+`~/.claude/settings.json` (needs Claude Code 2.1.280 or later; the pane needs 2.1.287). Do not
+do both: a session-only plugin shadows an installed one of the same name.
 
     "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/absolute/path/to/before-compact/before-compact" }
 
