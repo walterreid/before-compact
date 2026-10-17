@@ -170,3 +170,60 @@ Fill in after the first run.
 | Stage 2 grid | |
 | Stage 3 grid | |
 | Did the model know the arc file's name cold? | |
+
+## Baseline: what a stock compaction kept, measured on a past session
+
+Before this plugin existed, a session in another repository on this machine (the 2d
+pixel room builder, 2026-10-02) was auto-compacted twice. Its transcript holds both the
+summary the engine installed and the turns before it, so the two halves of the question
+can be read side by side without running anything live. Figures from the script's `--probe`
+and `--recover` on that transcript; the texts were read in full.
+
+**The compaction.** Automatic, 968,471 → 20,350 tokens, 88 seconds, 6 entries preserved.
+The window it summarized held 380 dialog turns (68 user, 312 assistant), about 64,000
+tokens; the transcript file is many times that because of tool results.
+
+**The engine's summary.** 20,381 characters, about 5,100 tokens, in nine numbered
+sections: primary request and intent; key technical concepts; files and code sections;
+errors and fixes; problem solving; **all user messages**; pending tasks; current work;
+next step. It ends by naming the transcript file as the place for exact details. Two
+observations that correct an assumption this project started with:
+
+- The summarizer does not drop the dialog. Section 6 lists 28 user messages: short ones
+  verbatim, long ones cut with an ellipsis where the reasoning begins. The summary keeps
+  the asks and keeps the voice in fragments.
+- The user's working rules survived in section 1 because they were in that project's
+  `AGENTS.md`. A rule stated in dialog has no such protection, which is why this repo's
+  rules live in `CLAUDE.md`.
+
+**What the hook would have added.** The 18 user turns before the boundary, in full:
+6,979 characters, about 1,500 tokens. Set beside section 6, the difference is exactly
+where the ellipses fall. Four examples:
+
+| The summary kept | The bundle restores |
+| --- | --- |
+| "Can't you extrapolate them?…" | the actual question: "I feel like I'm missing something about our flexibility, robustness of the architecture." |
+| "…robustness and flexibility not about hardcoding…" | the intent behind the project: the room output "was built so the user could download the room + the actual image to build it without our generator script. That was the intention of the town too." |
+| "it needs another story just to work from a perspective standpoint… a second story…" | the constraint that decided the design: it "might be one of those things that require more than 3 blocks of walls stacked on top of each other to look good." |
+| the fragments of "Where this lands…" | the standard set for the answer: "robustness + exactness… it also needs to be useable", and "Give me a plain spoke recommendation with examples." |
+
+Each is a why, a standard, or an intent, cut mid-sentence by the summarizer and restored
+whole by the bundle. The short approvals ("Push it and start phase 1") appear in both,
+which is the redundancy cost: roughly a third of the bundle repeats a line the summary
+already has, for a few hundred tokens.
+
+**What neither carries.** The assistant's side of the window, 312 turns and most of the
+64,000 tokens, where the record of what was done and verified lives; the summary's
+sections 4 and 5 are its compression of that. The arc file is the on-demand route to it.
+
+**How to read this against the live test.** Expect the pattern above: the summary gives
+breadth (every ask, the state of the code) and the bundle gives depth on the newest
+turns (the reasoning the summary cut). A live run that shows the same shape confirms the
+premise; one where the summary quotes the recent turns whole would mean the bundle is
+redundant on that build and the budget should go to the assistant's side instead.
+
+**What could make this baseline wrong.** One session, one build (October 2). The
+nine-section shape and the cut points are what that summarizer produced then; the
+Summary tab shows what today's produces. The brief that now ships by default asks the
+summarizer to quote constraints and corrections verbatim, so a current summary may cut
+less than this one did, which the live test will show.
