@@ -1,0 +1,41 @@
+# The three checks from CLAUDE.md, on a clean machine. Nothing here needs a sign-in:
+# validate and test are offline, and test/run.sh drives the script against synthetic
+# transcripts under its own HOME.
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The latest release. `claude plugin test` exists from Claude Code 2.1.287 on;
+      # see the README's Testing section for what an older version does here.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Show the version the checks ran on
+        run: claude --version
+
+      - name: Validate the plugin manifest and module
+        run: claude plugin validate --strict ./before-compact
+
+      - name: Run the script's tests
+        run: bash test/run.sh
+
+      # Mods are early access. On 2.1.299 with an empty config dir the kit ran without
+      # this switch; a reviewed plugin's CI (Better Compact) reports that some versions
+      # exit 1 on the early-access notice without it, so it is set to be safe.
+      - name: Run the mod's tests
+        env:
+          CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1"
+        run: cd before-compact && claude plugin test

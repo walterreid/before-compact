@@ -17,6 +17,9 @@
 // mod hook's next(e), or that $.state survives a real reload (the kit holds state for
 // one test only).
 import { expect, mock, test } from 'claude-code/testing'
+// The summary_instructions default: the plugin's brief. plugin.json's `default` holds
+// the same text (test/run.sh checks), and that is what seeds register(on, options) here.
+import { BRIEF } from '../hooks/brief.js'
 
 const HOME = '/home/t'
 const SESSION = 'sess1'
@@ -92,7 +95,8 @@ test('one compaction: PreCompact opens it, session.compact fills the numbers, Se
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Compactions this session: 1$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^#1 {2}\d\d:\d\d {2}manual {3}82k → 19k tokens {3}143 → 7 messages {3}\d+\.\d s$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan$/ })).toBeDefined()
+  // The knob's default brief went down too; the row shows it as a size, the typed text in full.
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: keep the plan \\+ summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\)$`) })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /PreCompact {2}✓ saved 32 user turns \(~1k tokens\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /SessionStart \? no status record \(press r\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /compacting now/ })).toBeUndefined()
@@ -147,7 +151,7 @@ test('the Summary tab: the result\'s first message, with the token counts and th
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^#1 {2}82k → 19k tokens {3}summary 128 chars \(~32 tokens\) {3}arc on disk 44k chars \(~10k tokens, 62 turns\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: `arc: ${ARC}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: keep the plan$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: `instructions given to the summarizer: keep the plan\n${BRIEF}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: SUM.text })).toBeDefined()
   // The bundle is not on this tab, and the monitor's rows are not either.
   expect(await ui.find({ type: 'Text', text: 'LAST BEFORE COMPACTION' })).toBeUndefined()
@@ -335,8 +339,41 @@ test('inject_in_mod off (the default): the result is untouched and no marker is 
 
 // --- the knob (userConfig summary_instructions) ----------------------------------
 // What these prove: what the stub standing in for the engine receives as the
-// event's instructions, with the knob set and with it empty. What they cannot
-// prove: how much a live summarizer honours the text. The Summary tab is for that.
+// event's instructions, with the knob at its default (the plugin's brief), set to
+// the person's own text, and cleared. What they cannot prove: how much a live
+// summarizer honours the text. The Summary tab is for that.
+
+test('summary_instructions default: the plugin\'s brief goes down after what was typed, and alone on an auto compaction', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const seen: any[] = []
+  on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 } })
+
+  // The brief is prose written for this plugin's goal, and says the four things it is for.
+  expect(BRIEF.length).toBeGreaterThan(200)
+  expect(BRIEF).toMatch(/constraints and corrections, quoted verbatim/)
+  expect(BRIEF).toMatch(/latest state/)
+  expect(BRIEF).toMatch(/reversed or changed, say so and give the reason/)
+  expect(BRIEF).toMatch(/verified by running, reading or testing separate from what was assumed or inferred/)
+  expect(BRIEF).toMatch(/open threads/)
+  expect(BRIEF).not.toMatch(/\n/)
+
+  const result = await $.session.compact({ trigger: 'manual', instructions: 'keep the plan', messages: transcript(10) } as any)
+  expect(seen[0].instructions).toBe(`keep the plan\n${BRIEF}`)
+  expect(result).toEqual({ messages: [SUMMARY, ...transcript(2)], tokensBefore: 82000, tokensAfter: 19000 })
+  await $.session.compact({ trigger: 'auto', messages: transcript(4) } as any)
+  expect(seen[1].instructions).toBe(BRIEF)
+
+  // The rows: typed text in full, the brief as a size; the Summary tab has the whole text.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: keep the plan \\+ summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\)$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: summary_instructions \\(${BRIEF.length} chars; tab 3 shows it\\) only$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ {4}instructions: .*${BRIEF.slice(0, 20)}`) })).toBeUndefined()
+  await ui.press({ key: 'tab-summary' })
+  expect(await ui.find({ type: 'Text', text: `instructions given to the summarizer: ${BRIEF}` })).toBeDefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
 
 test('summary_instructions set: the engine receives the /compact text and the knob\'s text, joined by a newline', async ($, on) => {
   const status = { log: [] as unknown[] }
@@ -361,9 +398,10 @@ test('summary_instructions set: the engine receives the /compact text and the kn
   await $.session.compact({ trigger: 'auto', messages: transcript(4) } as any)
   expect(seen[1].instructions).toBe('Keep every file path and every command verbatim.')
 
-  // The rows show what the summarizer was told, not only what was typed.
+  // The rows show the typed text and the knob's size; the Summary tab shows the whole text.
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan\nKeep every file path and every command verbatim\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan \+ summary_instructions \(48 chars; tab 3 shows it\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: summary_instructions \(48 chars; tab 3 shows it\) only$/ })).toBeDefined()
   await ui.press({ key: 'tab-summary' })
   expect(await ui.find({ type: 'Text', text: /^instructions given to the summarizer: Keep every file path and every command verbatim\.$/ })).toBeDefined()
   await ui.press({ key: 'tab-monitor' })
@@ -376,11 +414,13 @@ test('summary_instructions set: the engine receives the /compact text and the kn
   expect(seen[2].instructions).toBe('just this')
 })
 
-test('summary_instructions empty (the default): the engine receives the event untouched', async ($, on) => {
+test('summary_instructions cleared: the engine receives the event untouched, and the row shows the typed text alone', async ($, on) => {
   const status = { log: [] as unknown[] }
   stubs($, on, status)
+  on('config.set', ($, e) => ({ value: e.value }))
   const seen: any[] = []
   on('session.compact', ($, e) => { seen.push(e); return { messages: [SUMMARY], tokensBefore: 50000, tokensAfter: 4000 } })
+  await $.config.set({ key: 'before-compact.summary_instructions', value: '' } as any)
 
   const withText = { trigger: 'manual', instructions: 'keep the plan', messages: transcript(6) }
   await $.session.compact(withText as any)
@@ -391,6 +431,11 @@ test('summary_instructions empty (the default): the engine receives the event un
   await $.session.compact(without as any)
   expect(seen[1].instructions).toBeUndefined()
   expect(seen[1]).toMatchObject(without)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ {4}instructions: keep the plan$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /summary_instructions/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('the newest boundary on disk: --probe\'s compactMetadata numbers on the monitor, with no row from session.compact', async ($, on) => {

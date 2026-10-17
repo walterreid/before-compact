@@ -42,6 +42,14 @@ a("continuing"); u("AFTER BOUNDARY"); a("ok")
 open(sys.argv[4],"w").write("".join(json.dumps(e)+"\n" for e in ev))
 PY
 fail(){ echo "FAIL: $1"; exit 1; }
+# The summarizer brief has two homes (hooks/brief.js for the mod, plugin.json's default for
+# /config and the kit's seeding); they must be the same text.
+node -e '
+const fs=require("fs"); const [js,manifest]=process.argv.slice(1);
+import(js).then((m)=>{ const d=JSON.parse(fs.readFileSync(manifest,"utf8")).userConfig.summary_instructions.default;
+  if (typeof m.BRIEF!=="string"||!m.BRIEF.trim()) { console.error("brief.js exports no text"); process.exit(1) }
+  if (m.BRIEF!==d) { console.error("hooks/brief.js and plugin.json userConfig.summary_instructions.default differ"); process.exit(1) } })
+' "$HERE/../before-compact/hooks/brief.js" "$HERE/../before-compact/.claude-plugin/plugin.json" || fail "the summarizer brief differs between hooks/brief.js and plugin.json"
 out=$(node "$S" --file "$W/sess.jsonl" --recover --role user --turns 3)
 grep -q "LAST BEFORE COMPACTION" <<<"$out" || fail "recover did not return the last pre-compaction user turn"
 grep -q "AFTER" <<<"$out" && fail "recover leaked a post-compaction turn"
