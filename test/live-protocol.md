@@ -268,3 +268,92 @@ nine-section shape and the cut points are what that summarizer produced then; th
 Summary tab shows what today's produces. The brief that now ships by default asks the
 summarizer to quote constraints and corrections verbatim, so a current summary may cut
 less than this one did, which the live test will show.
+
+## Blind comparison: the summary alone against the summary plus the hooks (2026-10-17)
+
+**The question.** Does a fresh agent that gets the engine's summary plus the two hook
+blocks interrogate that summary better, and plan next steps that would need less redoing,
+than one that gets the summary alone? Put another way: do the missing details lead to
+backtracking, and does it matter? This is a separate test from the staged protocol above;
+it does not fill the record table.
+
+**Design.**
+- Three real compactions: this repository's own session (plugin 0.3.0/0.3.1 blocks), a
+  2d-pixel-room-builder session (0.3.2 blocks), and a clockwork-reels session (0.3.1 blocks,
+  which still had the bug that kept only 2 of the user's turns). Each condition used the
+  summary and the blocks those sessions actually received, not regenerated ones.
+- Six readers, one per session and condition, each limited by its instructions to a single
+  file: summary only, or summary plus the two blocks. Same task for both: treat the summary
+  as a report and list the claims to rely on, what could make it wrong, hidden assumptions,
+  missed implications, what to check or ask before continuing, and a confidence score.
+- Three blind judges, one per session. Each got the summary, the two reports under random
+  labels X and Y, and the window file (the full dialog of the window the summary covers,
+  both sides, untruncated, without tool outputs) as ground truth. They counted catches
+  (real gaps or errors in the summary the window confirms), false alarms, errors, important
+  misses, next steps that would go wrong, and checks the window shows were unnecessary,
+  then gave a verdict and its size. The key was applied only after all three had finished.
+- The raw summaries, window files and reports hold dialog from other projects, so they
+  were kept local and are not in this repository.
+
+**Predictions, written before any reader ran.**
+1. The hooks reader catches more real gaps in at least 2 of 3 sessions; slight to moderate.
+2. The clearest wins are stale items and the user's exact constraints.
+3. The summary-only reader raises more false alarms.
+4. Clockwork-reels shows the smallest difference, because of its 2-turn user block.
+5. Confound: the hooks reader's report may be longer; judges were told to score substance.
+
+**Results, unblinded.** Counts are hooks / summary only.
+
+| Session | Verdict | Catches | False alarms | Errors | Missed | Steps that go wrong | Unnecessary checks |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| before-compact | hooks, slight | 7 / 3 | 1 / 3 | 1 / 0 | 3 / 5 | 0 / 0 | 2 / 2 |
+| 2d-pixel-room-builder | hooks, moderate | 5 / 2 | 2 / 4 | 0 / 1 | 3 / 5 | 0 / 1 | 0 / 1 |
+| clockwork-reels | hooks, moderate | 4 / 2 | 1 / 2 | 1 / 0 | 3 / 5 | 0 / 0 | 2 / 1 |
+| **Total** | **3 of 3 for hooks** | **16 / 7** | **4 / 9** | **2 / 1** | **9 / 15** | **0 / 1** | **4 / 4** |
+
+| Prediction | Held? |
+| --- | --- |
+| 1. More catches in at least 2 of 3 | Yes, 3 of 3, slight once and moderate twice |
+| 2. Clearest wins are stale items and exact words | Yes |
+| 3. More false alarms without the hooks | Yes, 9 against 4 |
+| 4. Clockwork-reels shows the smallest difference | No: moderate despite the bug. The assistant block carried it. The smallest was before-compact. |
+| 5. Length confound | Not visible in the judges' reasoning |
+
+**What the difference was made of.** Without the hooks, readers would have:
+- asked the user again what "worked" meant, though the last turn before the compaction
+  had defined it with a six-item checklist;
+- asked whether the compaction was the live test, and whether a submission was already
+  under review, both settled in the window;
+- treated a settled design question as an open gate, and raised a test-hash tension the
+  window had already explained;
+- read the user's "fix bugs 1 to 4 first" as "wait for playtesting", where the hooks reader
+  read "first" as a queue of the user's own changes;
+- accepted a constraint the summary attributed to the wrong decision.
+
+Unnecessary re-checks were equal, 4 and 4. So the blocks did not save tool work in this
+test. They saved conversation: questions that would cost the user's turns, and next steps
+aimed the wrong way.
+
+**The min-chars finding.** One of the hooks readers' two errors came from reading an
+absence in the blocks as an absence in fact. In the before-compact session, the assistant
+turn "Push done and confirmed." was shorter than 200 characters, so `--min-chars 200` left
+it out of the assistant block, and the reader concluded the push was unconfirmed. Short
+assistant turns are often exactly the state changes ("done", "pushed"), so the filter
+deserves another look. Nothing has been changed yet. The other error, in clockwork-reels,
+confused the golden hashes with the test gates; nothing ties it to the blocks.
+
+**Caveats.**
+- Three sessions, each judged once, by a model of the same family as the readers.
+- The blinding was imperfect: the hooks readers cite turns as "[-3]" and so on, which shows
+  which one had the extra material. Judges were told not to reward that.
+- In the before-compact session both readers also saw this repository's git status and
+  instruction file, and both used them to call the summary stale. That inflates both of
+  their scores there, but not one side over the other.
+- The readers planned; they did not work. Fewer wrong steps in a plan is evidence about
+  backtracking, not a measurement of it.
+- The plugin's author designed the test. That is why the predictions were written first,
+  and why the one that failed is reported.
+
+**What would change the conclusion.** A repeat on new compactions with a second, different
+judge per session; or the same session compacted twice, with and without the plugin, and
+the real next hour of work compared.
