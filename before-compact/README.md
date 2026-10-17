@@ -406,9 +406,9 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 
 The same three run in GitHub Actions on every push to `main` and every pull request
 ([`.github/workflows/validate.yml`](../.github/workflows/validate.yml)): `ubuntu-latest`,
-Node 22, `npm install -g @anthropic-ai/claude-code`, then validate, `test/run.sh`, and
+Node 22, the Claude Code CLI installed from npm, then validate, `test/run.sh`, and
 `claude plugin test`. The kit test step needs a Claude Code of 2.1.287 or later, which is
-what `npm install -g` gives (the latest release). If the installed version is older, there
+what that install gives (the latest release). If the installed version is older, there
 is no `plugin test` subcommand: the CLI exits non-zero with an unknown-command error and
 the job fails at that step, while validate and `test/run.sh` have already passed. (That is
 the documented floor. On this machine the step also ran on a 2.1.286 build; it was not
@@ -535,6 +535,28 @@ It never approves, blocks, or alters a tool call or a prompt. It alters a compac
 way by default, by adding the `summary_instructions` brief to the summarizer's instructions
 (clear the knob to stop that), and in one more only when you ask: `inject_in_mod` appends
 your own messages after the summary, and is off by default.
+
+**For the plugin directory's review.** The mod in `hooks/register.js`, point by point:
+
+- **Files it writes:** with `digest_in_precompact` on, `~/.claude/before-compact/digest-<session id>.json`;
+  with `inject_in_mod` on, `~/.claude/before-compact/injected-<session id>.json`. Both are JSON
+  data that the plugin's own script reads; nothing runs them or takes instructions from them.
+  The paths hold the home folder and the session's id, so they cannot be fixed text.
+- **Programs it starts:** one, `node` on the plugin's own `scripts/extract_tail.mjs`, with
+  `--probe` (reads the session's transcript and prints counts as JSON) or `--recover` (prints
+  the turns before the last compaction, for the pane's tab 2). The script's path comes from
+  the plugin's root.
+- **What it reads and sends:** it reads the conversation and its own files to draw the pane.
+  It sends nothing of its own. Only with `digest_in_precompact` on, off by default, does it
+  send dialog to a model, through Claude Code's own model call (see *Digest*).
+- **Hooks that pass through:** the `/config` hook passes each change on unchanged and returns
+  the result unchanged; it only reads the new value of this plugin's own options. It takes
+  no permission decision. The `classic.PreCompact` and `classic.SessionStart` hooks pass their
+  events on unchanged and read the status records afterwards. The `session.compact` hook
+  appends the `summary_instructions` text to the summarizer's instructions (clear the option to
+  stop it), and with `inject_in_mod` on appends your own last messages after the summary.
+- **What it adds:** the `/before-compact` command. `.claude-plugin/icon.png` is the listing's
+  icon; nothing runs it.
 
 **To remove what it leaves behind,** delete `~/.claude/before-compact/` and the plugin's
 data directory (`~/.claude/plugins/data/before-compact-inline/` when loaded from a path),
