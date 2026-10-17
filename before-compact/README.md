@@ -9,8 +9,8 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 
 | Component | When | What |
 | --- | --- | --- |
-| `hooks/hooks.json` → `PreCompact`, first entry | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
-| `hooks/hooks.json` → `PreCompact`, second entry | the same moment | the same script with `--side assistant`: writes the assistant's last turns (assistant role, turns under 200 characters skipped, each cut after 1,500, ≤9000 chars) to `precompact-<session>-assistant.txt`. No arc. Skipped when `assistant_turns` is off (see *The assistant's turns*) |
+| `hooks/hooks.json` → `PreCompact`, first entry | before auto or manual compaction | writes your last turns (user role, ≤9000 chars; messages relayed into your slot, such as an agent's hand-back, left out; a turn too long for what is left of the budget replaced by a one-line note, so older turns still fit) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
+| `hooks/hooks.json` → `PreCompact`, second entry | the same moment | the same script with `--side assistant`: writes the assistant's last turns (assistant role, turns under 200 characters skipped, the newest two cut after 4,000 and older ones after 1,500, ≤9000 chars) to `precompact-<session>-assistant.txt`. No arc. Skipped when `assistant_turns` is off (see *The assistant's turns*) |
 | `hooks/hooks.json` → `SessionStart (compact)`, first entry | right after compaction | prints the user bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One factual line after the framing states where the newest arc file is, with its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
 | `hooks/hooks.json` → `SessionStart (compact)`, second entry | the same moment | prints the assistant bundle (or extracts it live) as a block of its own, under its own factual framing, with no pointer line and no digest: a second hook output, under its own 10,000-character cap. Skipped when `assistant_turns` is off |
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
@@ -156,13 +156,14 @@ values". So the assistant's turns go back as a block of their own, under their o
 without taking a character from yours.
 
 **What it does.** `hooks/hooks.json` has two entries per event. The second runs the same
-script with `--side assistant --role assistant --assistant-max 1500 --min-chars 200
---max-chars 9000`:
+script with `--side assistant --role assistant --assistant-max 1500 --newest-turns 2
+--newest-max 4000 --min-chars 200 --max-chars 9000`:
 
 - `PreCompact` writes `$CLAUDE_PLUGIN_DATA/precompact-<session>-assistant.txt`: the
-  assistant's last turns, newest first under 9,000 characters, each turn cut after its first
-  1,500 characters (the long ones lead with the conclusion, so the lead survives), turns
-  under 200 characters left out (one-line progress notes). No arc: the user side's entry
+  assistant's last turns, newest first under 9,000 characters: the newest two cut after
+  4,000 characters, older ones after their first 1,500 (the long ones lead with the
+  conclusion, so the lead survives), turns under 200 characters left out (one-line progress
+  notes). No arc: the user side's entry
   writes the one arc per compaction.
 - `SessionStart (compact)` prints that bundle under its own factual framing (*The following
   are the assistant's own prior turns from this same session, from just before the context
@@ -175,6 +176,19 @@ Measured on the session that asked for this, against the 9,000-character budget:
 assistant turns (about 1,800 tokens), or 11 cut at 1,200 characters, or 17 cut at 700.
 Assistant turns there ran from one-line progress notes to about 4,800 characters. 1,500 and
 200 are the defaults in `hooks.json`; both are flags, so edit the entry to tune them.
+
+The newest two get 4,000 since 0.3.2. In the first live compactions, a flat 1,500 cut the
+last report before the compaction mid-sentence, the turn most worth keeping whole. Measured
+on two real windows against the same 8,200 characters:
+
+| Setting | Window 1: kept, cut | Window 2: kept, cut |
+| --- | --- | --- |
+| Every turn up to 1,500 | 7, 3 cut | 9, 2 cut, the newest among them |
+| Every turn up to 4,000 | 3, none cut | 4, none cut |
+| Newest 2 up to 4,000, the rest 1,500 (the default) | 5, 2 cut | 9, 1 cut, the newest whole |
+
+The budget is the same in every row (about 2,000 tokens); the rows trade breadth for whole
+turns. `--newest-turns 0` restores the flat cap.
 
 **Off.** The script reads the option from `CLAUDE_PLUGIN_OPTION_ASSISTANT_TURNS`, the
 variable the plugins reference says Claude Code exports to hook processes for every option
@@ -448,10 +462,13 @@ the mod with `--probe` (at session start, on Refresh, and after a compaction) an
 **What it writes:**
 
 - `$CLAUDE_PLUGIN_DATA/precompact-<session id>.txt`: your last user turns, at most 9,000
-  characters, written before each compaction and read back after it.
+  characters, written before each compaction and read back after it. Messages that arrive in
+  your slot without your typing them (an agent's hand-back, a cross-session message, a
+  side-session event, a scheduled task's prompt, an artifact's context block) are left out;
+  the arc keeps them.
 - `$CLAUDE_PLUGIN_DATA/precompact-<session id>-assistant.txt`: the assistant's last turns,
-  at most 9,000 characters, turns under 200 characters skipped and each cut after its first
-  1,500, written and read back the same way by the second hook of each event. Not written
+  at most 9,000 characters, turns under 200 characters skipped, the newest two cut after
+  4,000 characters and older ones after 1,500, written and read back the same way by the second hook of each event. Not written
   when `assistant_turns` is off.
 - `$CLAUDE_PLUGIN_DATA/arc-<session id>-<n>.txt`: the back-and-forth of the window the
   compaction is about to summarize, that is, the turns after the most recent

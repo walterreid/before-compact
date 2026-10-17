@@ -1,7 +1,7 @@
 {
   "name": "before-compact",
   "description": "Keeps your last turns, verbatim, across compaction. PreCompact hooks save the last turns verbatim, yours and the assistant's as two bundles (and the full arc beside them); SessionStart hooks re-inject each as its own block after compaction. /before-compact:recover does it on demand; /before-compact opens a monitor pane with the summary the engine installed.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": {
     "name": "Walter Reid",
     "email": "walterreid@gmail.com"

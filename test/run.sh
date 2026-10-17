@@ -225,7 +225,9 @@ node "$S" --probe --file "$W/pre.jsonl" | grep -q '"compactions":0,"boundary_sou
 # The flags hooks.json passes. The digest file for session t is fresh at this point (THIS EPOCH DIGEST)
 # and the user bundle precompact-t.txt exists, so the checks below also prove the assistant side
 # leaves both alone.
-AS=(--hook --side assistant --role assistant --assistant-max 1500 --min-chars 200 --max-chars 9000)
+AS=(--hook --side assistant --role assistant --assistant-max 1500 --newest-turns 2 --newest-max 4000 --min-chars 200 --max-chars 9000)
+# AS must match the args hooks.json passes, in both assistant-side entries.
+python3 "$HERE/hooks_args.py" "$HERE/../before-compact/hooks/hooks.json" "${AS[@]}" || fail "AS differs from the assistant-side args in hooks.json"
 ST="$HOME/.claude/before-compact/status-t.jsonl"
 AB="$W/data/precompact-t-assistant.txt"
 arcs_before=$(ls "$W/data" | grep -c '^arc-t-' || true)
@@ -243,7 +245,7 @@ assert r["min_chars"]==200 and r["assistant_max"]==1500, r
 PY
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
 [[ "$out" == "The following are the assistant's own prior turns from this same session, from just before the context was compacted (prepared by the PreCompact hook)."* ]] || fail "the assistant SessionStart output does not start with its own framing"
-grep -q "turns shorter than 200 characters were left out, and a turn longer than 1500 characters is cut" <<<"$out" || fail "the assistant framing does not state the min-chars and assistant-max rules"
+grep -q "turns shorter than 200 characters were left out, and the newest 2 turns are cut after 4000 characters and older ones after 1500" <<<"$out" || fail "the assistant framing does not state the min-chars, newest-turn and assistant-max rules"
 grep -q "===== ASSISTANT" <<<"$out" || fail "the assistant SessionStart output has no assistant turn"
 grep -q "===== USER" <<<"$out" && fail "the assistant SessionStart output holds a user turn"
 grep -q "LAST BEFORE COMPACTION" <<<"$out" && fail "the assistant SessionStart output holds the newest user turn's text"
@@ -322,4 +324,38 @@ for i in $(seq 1 20); do
   n1=$(python3 -c 'import json,sys; print(len([json.loads(l) for l in open(sys.argv[1]) if l.strip()]))' "$ST" 2>/dev/null || echo unreadable)
   [ "$n1" = "$((n0+2))" ] || fail "concurrent SessionStart hooks, pair $i: status records went $n0 -> $n1 (one record lost, or the file unreadable)"
 done
+
+# 0.3.2, from a live compaction where an agent's hand-back ended the user side's budget walk
+# and five of the user's own turns were never reached. Fixtures: test/make_fixtures_032.py.
+python3 "$HERE/make_fixtures_032.py" "$W/relay.jsonl" "$W/newest.jsonl"
+echo '{"session_id":"relay","transcript_path":"'"$W/relay.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" --hook --role user --max-chars 9000
+RB="$W/data/precompact-relay.txt"
+[ -s "$RB" ] || fail "the relay fixture wrote no user bundle"
+for t in "OLDEST own turn A" "own turn B" "Typed after the context" "NEWEST own turn C"; do
+  grep -q "$t" "$RB" || fail "user side: the user's own text '$t' is missing"
+done
+for t in "Another Claude session" "agent-message" "RRRR" "relayed note" "scheduled prompt" "side-sessions-event" "context block" "PPPP"; do
+  grep -q "$t" "$RB" && fail "user side: '$t' should have been left out"
+done
+grep -q "(12000 chars, over the remaining budget, so left out here; the transcript has it whole)" "$RB" || fail "the over-budget paste has no note in its place"
+order=$(grep -o 'OLDEST own turn A\|own turn B\|Typed after the context\|12000 chars, over\|NEWEST own turn C' "$RB" | tr '\n' '|')
+[ "$order" = "OLDEST own turn A|own turn B|Typed after the context|12000 chars, over|NEWEST own turn C|" ] || fail "user side order is wrong: $order"
+grep -q '^\[4 turns (4 user / 0 assistant)' "$RB" || fail "the stats line should count the 4 kept turns, not the note"
+grep -q '1 turn(s) over the remaining budget left out, each with a one-line note in its place' "$RB" || fail "the budget line does not report the note"
+grep -q "older turns dropped" "$RB" && fail "nothing was dropped, but the budget line says so"
+python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][-1]; assert r["turns"]==4 and r["noted"]==1, r' "$HOME/.claude/before-compact/status-relay.jsonl" || fail "the relay status record should say 4 turns and 1 note"
+grep -q "Another Claude session" "$W/data/arc-relay-1.txt" || fail "the arc should keep relayed messages: it is the full record"
+
+# The newest two assistant turns up to 4,000 chars, older ones at 1,500.
+echo '{"session_id":"newest","transcript_path":"'"$W/newest.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" "${AS[@]}"
+NB="$W/data/precompact-newest-assistant.txt"
+grep -q "END-5" "$NB" && grep -q "END-4" "$NB" || fail "the newest two assistant turns are not whole"
+grep -q "ATURN3" "$NB" || fail "the third-newest assistant turn is missing"
+grep -q "END-3" "$NB" && fail "the third-newest assistant turn was not cut at 1,500"
+python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][-1]; assert r["side"]=="assistant" and r["newest_turns"]==2 and r["newest_max"]==4000 and r["assistant_max"]==1500, r' "$HOME/.claude/before-compact/status-newest.jsonl" || fail "the assistant status record lacks newest_turns 2 and newest_max 4000"
+out=$(echo '{"session_id":"newest","transcript_path":"'"$W/newest.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" "${AS[@]}")
+grep -q "the newest 2 turns are cut after 4000 characters and older ones after 1500" <<<"$out" || fail "the assistant framing does not state the newest-turn allowance"
+# --newest-turns 0 is the flat cap again.
+echo '{"session_id":"flat","transcript_path":"'"$W/newest.jsonl"'","hook_event_name":"PreCompact","trigger":"manual"}' | node "$S" --hook --side assistant --role assistant --assistant-max 1500 --newest-turns 0 --min-chars 200 --max-chars 9000
+grep -q "END-5" "$W/data/precompact-flat-assistant.txt" && fail "--newest-turns 0 should cut the newest turn at 1,500 too"
 echo "all checks passed"

@@ -15,6 +15,10 @@
 //        node scripts/extract_tail.mjs --turns 120 | --role user | --assistant-max 0 | --raw
 //        node scripts/extract_tail.mjs --file /path/to/session.jsonl
 //        node scripts/extract_tail.mjs --max-chars 9000   # total budget; drops oldest turns first
+//      A turn too long for what is left of the budget is not the end of the walk: it
+//      becomes a one-line note in its place, and the older turns behind it still get
+//      their turn. Before 0.3.2 one oversized message (an agent's hand-back of 10,545
+//      characters, live) ended the walk and dropped every older turn.
 //
 //   2. As a Claude Code hook (--hook): reads the hook's JSON from stdin.
 //        PreCompact    → writes the recovery bundle to a file BEFORE the window is
@@ -46,8 +50,16 @@
 //                   absent means the default, on).
 //      --min-chars N skips turns shorter than N characters (default 0). The assistant
 //      hook passes 200 so one-line progress notes are left out; --assistant-max 1500
-//      keeps the lead of each longer turn. Both sides honour the inject_in_mod
-//      stand-down marker; neither deletes it (see peekMarker).
+//      keeps the lead of each longer turn, and --newest-turns 2 --newest-max 4000 keep
+//      the newest two whole up to 4,000 (the last report before a compaction is the one
+//      most worth keeping). Both sides honour the inject_in_mod stand-down marker;
+//      neither deletes it (see peekMarker).
+//
+//      With --role user, messages that arrive in the user's slot but were not typed by
+//      the user are left out: an agent's hand-back ("Another Claude session sent a
+//      message"), a cross-session message, a side-session event, a scheduled task's
+//      prompt, an artifact's context block (the text typed after it is kept). See
+//      stripRelayed. --role both (the arc) keeps them: it is the full record.
 //
 // WHERE THE CONVERSATION LIVES (manual mode only):
 //   ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl, where <encoded-cwd> is
@@ -73,7 +85,7 @@ function flag(name, def) {
 }
 if (flag('help', false)) {
   console.log('extract_tail.mjs — see the comment header of this file for full usage.');
-  console.log('Common: --turns N | --role user|assistant|both | --assistant-max CHARS | --min-chars CHARS | --max-chars CHARS | --raw | --recover | --file PATH | --hook [--side user|assistant]');
+  console.log('Common: --turns N | --role user|assistant|both | --assistant-max CHARS | --newest-turns N | --newest-max CHARS | --min-chars CHARS | --max-chars CHARS | --raw | --recover | --file PATH | --hook [--side user|assistant]');
   process.exit(0);
 }
 const HOOK        = Boolean(flag('hook', false));                    // read hook JSON from stdin
@@ -82,6 +94,8 @@ const TURNS       = Number(flag('turns', 60));
 const ROLE        = String(flag('role', SIDE === 'assistant' ? 'assistant' : 'both')).toLowerCase(); // both | user | assistant
 const ASSIST_MAX  = Number(flag('assistant-max', SIDE === 'assistant' ? 1500 : 700)); // chars per assistant turn; 0 = header only
 const USER_MAX    = Number(flag('user-max', 0)) || Infinity;         // chars per user turn; 0/omitted = unlimited
+const NEWEST_TURNS = Number(flag('newest-turns', 0)) || 0;                          // the newest N assistant turns get --newest-max; off unless given (hooks.json passes 2)
+const NEWEST_MAX   = Number(flag('newest-max', 4000)) || 0;                          // chars for each of those (used when above --assistant-max)
 const MIN_CHARS   = Number(flag('min-chars', 0)) || 0;               // skip turns shorter than this (after noise is stripped)
 const MAX_CHARS   = Number(flag('max-chars', HOOK ? 9000 : 0)) || Infinity; // total budget; 0 = unlimited
 if (SIDE !== 'user' && SIDE !== 'assistant') { console.error(`extract_tail: --side must be user or assistant, not "${SIDE}"`); process.exit(HOOK ? 0 : 1); }
@@ -323,6 +337,18 @@ function stripNoise(t) {
     .replace(/<command-[\s\S]*?<\/command-[^>]*>/g, '')
     .trim();
 }
+// Messages that arrive in the user's slot but were not typed by the user, as Claude Code
+// writes them (each shape counted in this machine's transcripts, 2026-10-17): an agent's
+// hand-back or a relayed session message, which starts with the sentence below and ends
+// with Claude Code's own explanation; a side-session event, a scheduled task's prompt and
+// a cross-session message, each one whole block; an artifact's context block, followed by
+// what the user typed; content marked as authored by others. On the user side they are
+// not the user's voice. Returns what the user typed, or '' when nothing of theirs is left.
+const RELAYED_BLOCK = /<(side-sessions-event|scheduled-task|cross-session-message|artifact-view-context)\b[^>]*>[\s\S]*?<\/\1>/g;
+function stripRelayed(t) {
+  if (/^(Another Claude session sent a message|<artifact-content-authored-by-others\b)/.test(t)) return '';
+  return t.replace(RELAYED_BLOCK, '').trim();
+}
 // The opening phrase of the summary message Claude Code installs after a
 // compaction. Only a fallback now (see findBoundaries): the boundary entry is the
 // primary marker, and in a transcript that has one a turn quoting this phrase is
@@ -401,6 +427,7 @@ function extract(T, o = {}) {
   const turns = o.turns ?? TURNS, role = o.role ?? ROLE, assistMax = o.assistMax ?? ASSIST_MAX;
   const userMax = o.userMax ?? USER_MAX, maxChars = o.maxChars ?? MAX_CHARS, reserve = o.reserve ?? 0;
   const minChars = o.minChars ?? MIN_CHARS;
+  const newestTurns = o.newestTurns ?? NEWEST_TURNS, newestMax = o.newestMax ?? NEWEST_MAX;
   const lines = readFileSync(T, 'utf8').split('\n').filter(Boolean);
   const bounds = findBoundaries(lines);
   const marks = bounds.map((b) => b.index);
@@ -433,7 +460,7 @@ function extract(T, o = {}) {
   // Walk backward from the end, newest first, so the budget keeps the most recent turns.
   const collected = [];
   let budget = isFinite(maxChars) ? Math.max(200, maxChars - reserve) : maxChars;
-  let dropped = 0;
+  let noted = 0, stopped = false, assistants = 0;
   for (let i = startIdx; i > floor && collected.length < turns; i--) {
     let ev;
     try { ev = JSON.parse(lines[i]); } catch { continue; }
@@ -447,27 +474,49 @@ function extract(T, o = {}) {
     if (Array.isArray(content) && content.length &&
         content.every((b) => b && (b.type === 'tool_result' || b.type === 'tool_use'))) continue;
     let txt = stripNoise(textOf(content));
+    if (!RAW && who === 'USER' && role === 'user') txt = stripRelayed(txt);
     if (!txt) continue;
     if (!RAW && summaries.has(i)) continue;               // the injected summary, not a real turn
     if (txt.length < minChars) continue;                   // --min-chars: a progress line, not a turn worth the budget
-    txt = truncate(txt, who === 'USER' ? userMax : assistMax);
+    const full = txt.length;
+    // The newest --newest-turns assistant turns are cut at --newest-max, when that is the larger.
+    const cap = who === 'USER' ? userMax
+      : assistants < newestTurns && isFinite(assistMax) && assistMax > 0 && newestMax > assistMax ? newestMax : assistMax;
+    txt = truncate(txt, cap);
     txt = txt || '(omitted — assistant-max 0)';
     const cost = txt.length + 40;                          // + per-turn header overhead
-    if (isFinite(budget) && cost > budget) { dropped++; if (collected.length) break; continue; }
+    if (isFinite(budget) && cost > budget) {
+      // Too long for what is left: a one-line note keeps its place, and the older turns
+      // behind it still get their turn.
+      const note = `(${full} chars, over the remaining budget, so left out here; the transcript has it whole)`;
+      if (note.length + 40 > budget) { stopped = true; break; }
+      budget -= note.length + 40;
+      noted++;
+      collected.push({ role: who, txt: note, noted: true });
+      if (who === 'ASSISTANT') assistants++;
+      continue;
+    }
     budget -= cost;
     collected.push({ role: who, txt });
+    if (who === 'ASSISTANT') assistants++;
   }
   collected.reverse(); // oldest -> newest
 
   const body = collected.map((c, n) => `\n===== ${c.role}  [${n - collected.length}] =====\n${c.txt}`).join('\n');
-  const chars = collected.reduce((s, c) => s + c.txt.length, 0);
-  const users = collected.filter((c) => c.role === 'USER').length;
+  // Counts and tokens are the turns kept; a note stands in for a turn, it is not one.
+  const kept = collected.filter((c) => !c.noted);
+  const chars = kept.reduce((s, c) => s + c.txt.length, 0);
+  const users = kept.filter((c) => c.role === 'USER').length;
+  const budgetBits = [
+    noted ? `${noted} turn(s) over the remaining budget left out, each with a one-line note in its place` : '',
+    stopped ? `kept the newest ${kept.length}; older turns dropped` : '',
+  ].filter(Boolean).join('; ');
   const stats =
-    `[${collected.length} turns (${users} user / ${collected.length - users} assistant)` +
+    `[${kept.length} turns (${users} user / ${kept.length - users} assistant)` +
     `  ·  ~${Math.round(chars / 4)} tokens  ·  source: ${T}]` +
     (RECOVER ? `\n[recover: ${recoverNote}]` : '') +
-    (isFinite(maxChars) && dropped ? `\n[budget: --max-chars ${maxChars}${reserve ? ` (${reserve} reserved for the framing)` : ''} kept the newest ${collected.length}; older turns dropped]` : '');
-  return { body, stats, count: collected.length, tokens: Math.round(chars / 4), epoch };
+    (isFinite(maxChars) && budgetBits ? `\n[budget: --max-chars ${maxChars}${reserve ? ` (${reserve} reserved for the framing)` : ''}: ${budgetBits}]` : '');
+  return { body, stats, count: kept.length, noted, tokens: Math.round(chars / 4), epoch };
 }
 
 // ---- probe mode: what does the transcript say about past compactions? ------
@@ -537,8 +586,9 @@ if (HOOK) {
       const arcChars = writeExtract(a, arc);
       Object.assign(rec, { arc: a, arc_written: arcChars != null, arc_turns: arc.count, arc_chars: arcChars ?? 0, arc_tokens_est: arc.tokens });
     } else {
-      Object.assign(rec, { min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null });
+      Object.assign(rec, { min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null, newest_turns: NEWEST_TURNS, newest_max: NEWEST_MAX });
     }
+    rec.noted = out.noted;
     recordStatus(hook.session_id, rec);
     process.exit(0);
   }
@@ -593,7 +643,10 @@ if (HOOK) {
       // user side's hook prints the user's turns, the pointer line and the digest.
       const cuts = [
         MIN_CHARS > 0 ? `turns shorter than ${MIN_CHARS} characters were left out` : '',
-        isFinite(ASSIST_MAX) && ASSIST_MAX > 0 ? `a turn longer than ${ASSIST_MAX} characters is cut after its first ${ASSIST_MAX}` : '',
+        !isFinite(ASSIST_MAX) || ASSIST_MAX <= 0 ? ''
+          : NEWEST_TURNS > 0 && NEWEST_MAX > ASSIST_MAX
+            ? `the newest ${NEWEST_TURNS} turns are cut after ${NEWEST_MAX} characters and older ones after ${ASSIST_MAX}`
+            : `a turn longer than ${ASSIST_MAX} characters is cut after its first ${ASSIST_MAX}`,
       ].filter(Boolean).join(', and ');
       const framing =
         `The following are the assistant's own prior turns from this same session, from just before ` +
@@ -604,7 +657,7 @@ if (HOOK) {
       const output = `${framing}${text}`;
       recordStatus(hook.session_id, {
         ...src, origin, injected: true, chars: output.length, tokens_est: Math.round(output.length / 4),
-        min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null,
+        min_chars: MIN_CHARS, assistant_max: isFinite(ASSIST_MAX) ? ASSIST_MAX : null, newest_turns: NEWEST_TURNS, newest_max: NEWEST_MAX,
       });
       console.log(output);
       process.exit(0);
