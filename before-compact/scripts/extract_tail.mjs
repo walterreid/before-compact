@@ -91,10 +91,10 @@ function bundlePath(sessionId) {
   return join(dataDir(), `precompact-${sessionId || 'unknown'}.txt`);
 }
 // The arc: the back-and-forth of the CURRENT WINDOW (the turns after the most
-// recent compaction-summary marker in the transcript; the whole transcript when
-// there is none), both roles, nothing cut, written beside the bundle. One file per
-// compaction, never overwritten: arc-<session>-<n>.txt, n = the markers already in
-// the transcript + 1, so each epoch keeps its own file. Not injected (it has no
+// recent compaction boundary in the transcript; the whole transcript when there
+// is none), both roles, nothing cut, written beside the bundle. One file per
+// compaction, never overwritten: arc-<session>-<n>.txt, n = the boundaries already
+// in the transcript + 1, so each epoch keeps its own file. Not injected (it has no
 // budget); the SessionStart output names the newest one.
 function arcPath(sessionId, n) {
   return join(dataDir(), `arc-${sessionId || 'unknown'}-${n}.txt`);
@@ -224,8 +224,12 @@ function stripNoise(t) {
     .replace(/<command-[\s\S]*?<\/command-[^>]*>/g, '')
     .trim();
 }
-const isCompactionSummary = (t) =>
-  t.includes('This session is being continued from a previous conversation');
+// The opening phrase of the summary message Claude Code installs after a
+// compaction. Only a fallback now (see findBoundaries): the boundary entry is the
+// primary marker, and in a transcript that has one a turn quoting this phrase is
+// an ordinary turn.
+const MARKER_PHRASE = 'This session is being continued from a previous conversation';
+const isCompactionSummary = (t) => t.includes(MARKER_PHRASE);
 
 function truncate(t, max) {
   if (RAW || !isFinite(max)) return t;   // --raw is verbatim; otherwise 0/omitted = unlimited
@@ -234,35 +238,80 @@ function truncate(t, max) {
   return t.slice(0, max) + `\n  …[+${t.length - max} chars truncated — rerun with --raw or a larger --*-max to see all]`;
 }
 
-// The transcript indices of the compaction-summary markers (the injected "This
-// session is being continued…" user turns), oldest first. A cheap substring test
-// first, so only candidate lines are parsed.
-const MARKER_PHRASE = 'This session is being continued from a previous conversation';
-function markerIndices(lines) {
+// The compaction boundaries of a transcript, oldest first, each as
+//   { index, summaryIndex, source, at, trigger, preTokens, postTokens, durationMs, preserved }
+//
+// PRIMARY: the entry Claude Code writes immediately before each summary message:
+//   {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,
+//    preTokens, postTokens, durationMs, cumulativeDroppedTokens, preservedMessages:
+//    {anchorUuid, uuids, allUuids}, preservedSegment}, ...}
+// (seen on this machine in every transcript Claude Code compacted). The summary
+// message is the FIRST `user` entry after it: usually the next line, but a few
+// `attachment` entries can sit in between (11 of 58 boundaries here had three).
+// `index` is the boundary entry; `summaryIndex` is that summary message, so
+// extract() can skip it without a text test.
+//
+// FALLBACK, only when a transcript has no such entry (written by an older Claude
+// Code): the user message that opens with MARKER_PHRASE. Then index = summaryIndex
+// and the engine's numbers are null. A turn that merely quotes the phrase counts
+// as a boundary only on this path.
+//
+// A cheap substring test first, so only candidate lines are parsed.
+const BOUNDARY_TAG = '"compact_boundary"';
+function findBoundaries(lines) {
+  const parse = (i) => { try { return JSON.parse(lines[i]); } catch { return null; } };
   const out = [];
   for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes(BOUNDARY_TAG)) continue;
+    const ev = parse(i);
+    if (!ev || ev.type !== 'system' || ev.subtype !== 'compact_boundary') continue;
+    let summaryIndex = null;
+    for (let j = i + 1; j < Math.min(lines.length, i + 50); j++) {
+      const n = parse(j);
+      if (n && n.type === 'user') { summaryIndex = j; break; }
+    }
+    const m = ev.compactMetadata || {};
+    const uuids = m.preservedMessages && Array.isArray(m.preservedMessages.uuids) ? m.preservedMessages.uuids : null;
+    out.push({
+      index: i, summaryIndex, source: 'compact_boundary', at: ev.timestamp || null,
+      trigger: m.trigger ?? null, preTokens: m.preTokens ?? null, postTokens: m.postTokens ?? null,
+      durationMs: m.durationMs ?? null, preserved: uuids ? uuids.length : null,
+    });
+  }
+  if (out.length) return out;
+  for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(MARKER_PHRASE)) continue;
-    let ev; try { ev = JSON.parse(lines[i]); } catch { continue; }
-    const t = ev && ev.message ? textOf(ev.message.content) : '';
-    if (t && isCompactionSummary(t)) out.push(i);
+    const ev = parse(i);
+    if (!ev || ev.type !== 'user' || !ev.message) continue;
+    const t = textOf(ev.message.content);
+    if (t && isCompactionSummary(t)) {
+      out.push({ index: i, summaryIndex: i, source: 'phrase', at: ev.timestamp || null, summary_chars: t.length,
+        trigger: null, preTokens: null, postTokens: null, durationMs: null, preserved: null });
+    }
   }
   return out;
 }
+// The transcript indices of the boundaries, oldest first.
+const markerIndices = (lines) => findBoundaries(lines).map((b) => b.index);
 
 // ---- the extraction, as a function so hook mode can call it ----------------
 // `o` overrides the command-line knobs (the arc uses it: both roles, no limits,
-// and `window`: stop at the most recent marker, so only the current window's turns
-// are taken, the inverse of --recover, which takes the turns before that marker).
+// and `window`: stop at the most recent boundary, so only the current window's
+// turns are taken, the inverse of --recover, which takes the turns before it).
 function extract(T, o = {}) {
   const turns = o.turns ?? TURNS, role = o.role ?? ROLE, assistMax = o.assistMax ?? ASSIST_MAX;
   const userMax = o.userMax ?? USER_MAX, maxChars = o.maxChars ?? MAX_CHARS, reserve = o.reserve ?? 0;
   const lines = readFileSync(T, 'utf8').split('\n').filter(Boolean);
-  const marks = markerIndices(lines);
+  const bounds = findBoundaries(lines);
+  const marks = bounds.map((b) => b.index);
+  // The summary messages themselves: not real turns, never part of an extraction.
+  const summaries = new Set(bounds.map((b) => b.summaryIndex).filter((i) => i != null));
 
-  // --recover: a compaction leaves a marker in the SAME transcript — the injected
-  // "This session is being continued…" summary. Recover the turns immediately
-  // BEFORE the most recent one. Falls back to the plain tail if none is found —
-  // which, at PreCompact time or if the transcript lags, IS the pre-compaction tail.
+  // --recover: a compaction leaves a boundary in the SAME transcript (the
+  // compact_boundary entry, or on an older transcript the injected "This session
+  // is being continued…" summary). Recover the turns immediately BEFORE the most
+  // recent one. Falls back to the plain tail if none is found — which, at
+  // PreCompact time or if the transcript lags, IS the pre-compaction tail.
   let startIdx = lines.length - 1;
   let recoverNote = '';
   if (RECOVER) {
@@ -270,8 +319,8 @@ function extract(T, o = {}) {
     if (mark >= 0) { startIdx = mark - 1; recoverNote = `recovered the turns BEFORE the last compaction (transcript event ${mark} of ${lines.length})`; }
     else recoverNote = 'no compaction boundary found in the transcript — showing the normal tail';
   }
-  // `window`: the floor is the newest marker at or below the start (exclusive), and
-  // the epoch number counts the markers below it plus one. At PreCompact time that
+  // `window`: the floor is the newest boundary at or below the start (exclusive), and
+  // the epoch number counts the boundaries below it plus one. At PreCompact time that
   // is "all the markers + 1"; on the SessionStart fallback, where the new summary
   // is already in the transcript, it is the window just closed.
   let floor = -1, epoch = 1;
@@ -299,7 +348,7 @@ function extract(T, o = {}) {
         content.every((b) => b && (b.type === 'tool_result' || b.type === 'tool_use'))) continue;
     let txt = stripNoise(textOf(content));
     if (!txt) continue;
-    if (!RAW && isCompactionSummary(txt)) continue;       // the injected summary, not a real turn
+    if (!RAW && summaries.has(i)) continue;               // the injected summary, not a real turn
     txt = truncate(txt, who === 'USER' ? userMax : assistMax);
     txt = txt || '(omitted — assistant-max 0)';
     const cost = txt.length + 40;                          // + per-turn header overhead
@@ -322,19 +371,33 @@ function extract(T, o = {}) {
 
 // ---- probe mode: what does the transcript say about past compactions? ------
 // Prints one JSON object. Used by the plugin's pane on a resumed session, where
-// compactions happened before any hook was watching.
+// compactions happened before any hook was watching, and on a Claude Code that
+// does not fire session.compact into the mod: the boundary entries carry the
+// engine's own numbers, so `markers[]` has, per boundary, trigger, preTokens,
+// postTokens, durationMs and preserved (the count of preservedMessages.uuids);
+// `boundary_source` says whether they came from compact_boundary entries or from
+// the phrase fallback (then those fields are null).
 if (flag('probe', false)) {
   const T = pickTranscript();
   const lines = readFileSync(T, 'utf8').split('\n').filter(Boolean);
-  const markers = [];
   let users = 0, assistants = 0;
   for (let i = 0; i < lines.length; i++) {
     let ev; try { ev = JSON.parse(lines[i]); } catch { continue; }
     if (ev.type === 'user') users++; else if (ev.type === 'assistant') assistants++;
-    const t = ev && ev.message ? textOf(ev.message.content) : '';
-    if (t && isCompactionSummary(t)) markers.push({ index: i, at: ev.timestamp || null, summary_chars: t.length });
   }
-  console.log(JSON.stringify({ transcript: T, events: lines.length, user_events: users, assistant_events: assistants, compactions: markers.length, markers: markers.slice(-10) }));
+  const bounds = findBoundaries(lines);
+  const markers = bounds.map((b) => {
+    let summary_chars = b.summary_chars ?? null;
+    if (summary_chars == null && b.summaryIndex != null) {
+      try { summary_chars = textOf(JSON.parse(lines[b.summaryIndex]).message.content).length; } catch { /* leave null */ }
+    }
+    return { index: b.index, summary_index: b.summaryIndex, at: b.at, source: b.source, summary_chars,
+      trigger: b.trigger, preTokens: b.preTokens, postTokens: b.postTokens, durationMs: b.durationMs, preserved: b.preserved };
+  });
+  console.log(JSON.stringify({
+    transcript: T, events: lines.length, user_events: users, assistant_events: assistants,
+    compactions: markers.length, boundary_source: bounds.length ? bounds[0].source : null, markers: markers.slice(-10),
+  }));
   process.exit(0);
 }
 
@@ -391,7 +454,7 @@ if (HOOK) {
       if (!out.count) process.exit(0);                     // nothing worth injecting
       text = `${out.body}\n\n${out.stats}`; origin = 'extracted from the transcript after compaction';
       // No PreCompact hook ran, so no arc either: write one for the window just
-      // closed (RECOVER is on, so the window ends at the new summary's marker).
+      // closed (RECOVER is on, so the window ends at the new boundary).
       const arcOut = extract(T, ARC);
       writeExtract(arcPath(hook.session_id, arcOut.epoch), arcOut);
     }

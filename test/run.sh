@@ -6,10 +6,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; S="$HERE/../before-compact/scripts/extrac
 W="$(mktemp -d)"; export CLAUDE_PLUGIN_DATA="$W/data"
 # The script writes status records under $HOME/.claude/before-compact/; keep the test out of the real home.
 export HOME="$W/home"; mkdir -p "$HOME"
-# sess.jsonl: 30 exchanges, then a compaction-summary marker, then two post-compaction turns.
-# pre.jsonl: the same transcript as it stood BEFORE that compaction (no marker): what a
-# PreCompact hook sees. three.jsonl: three epochs (EPOCH1..3) split by two markers.
-python3 - "$W/sess.jsonl" "$W/pre.jsonl" "$W/three.jsonl" <<'PY'
+# sess.jsonl: 30 exchanges, then a compaction-summary marker (the phrase alone, as an older
+# Claude Code wrote it), then two post-compaction turns. pre.jsonl: the same transcript as it
+# stood BEFORE that compaction (no marker): what a PreCompact hook sees. three.jsonl: three
+# epochs (EPOCH1..3) split by two phrase markers. bound.jsonl: what a current Claude Code
+# writes: a user turn that QUOTES the phrase, then the real boundary, a system entry with
+# subtype compact_boundary and the engine's compactMetadata, followed by the summary message.
+python3 - "$W/sess.jsonl" "$W/pre.jsonl" "$W/three.jsonl" "$W/bound.jsonl" <<'PY'
 import json,sys
 ev=[]
 u=lambda t: ev.append({"type":"user","message":{"role":"user","content":t}})
@@ -25,6 +28,18 @@ for n in (1,2,3):
     if n>1: u(f"This session is being continued from a previous conversation. Summary {n-1}.")
     for i in range(1,6): u(f"EPOCH{n} user {i}"); a(f"EPOCH{n} assistant {i}")
 open(sys.argv[3],"w").write("".join(json.dumps(e)+"\n" for e in ev))
+ev=[]
+for i in range(1,6): u(f"BOUND user {i}"); a(f"BOUND assistant {i}")
+u('I saw "This session is being continued from a previous conversation" in a log once. QUOTED PHRASE'); a("noted")
+u("LAST BEFORE BOUNDARY"); a("ok")
+ev.append({"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","timestamp":"2026-09-27T15:33:49.229Z",
+  "compactMetadata":{"trigger":"auto","preTokens":965550,"postTokens":25855,"cumulativeDroppedTokens":939695,"durationMs":103240,
+    "preservedSegment":{"headUuid":"h","anchorUuid":"a","tailUuid":"t"},
+    "preservedMessages":{"anchorUuid":"a","uuids":[f"u{i}" for i in range(7)],"allUuids":[f"u{i}" for i in range(11)]}}})
+for k in range(3): ev.append({"type":"attachment","attachment":{"type":"x","n":k}})   # seen between the entry and the summary in 11 of 58 real boundaries
+u("This session is being continued from a previous conversation. Summary of the first window.")
+a("continuing"); u("AFTER BOUNDARY"); a("ok")
+open(sys.argv[4],"w").write("".join(json.dumps(e)+"\n" for e in ev))
 PY
 fail(){ echo "FAIL: $1"; exit 1; }
 out=$(node "$S" --file "$W/sess.jsonl" --recover --role user --turns 3)
@@ -98,4 +113,41 @@ printf '{"at":"2020-01-01T00:00:00Z","trigger":"manual","appended":5,"chars":120
 out=$(echo '{"session_id":"t","transcript_path":"'"$W/sess.jsonl"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user)
 grep -q "prepared by the PreCompact hook" <<<"$out" || fail "a stale marker suppressed the injection"
 [ -e "$M" ] && fail "the stale marker was not removed"
+# ---- the compact_boundary entry is the boundary; the phrase is only a fallback ----
+B="$W/bound.jsonl"
+bidx=$(( $(grep -n '"compact_boundary"' "$B" | cut -d: -f1) - 1 ))   # 0-based transcript index of the entry
+out=$(node "$S" --file "$B" --recover --role user --turns 20)
+grep -q "LAST BEFORE BOUNDARY" <<<"$out" || fail "recover on a boundary transcript did not return the last turn before the compact_boundary entry"
+grep -q "QUOTED PHRASE" <<<"$out" || fail "a user turn quoting the phrase was dropped or taken as the boundary although a compact_boundary entry exists"
+grep -q "AFTER BOUNDARY" <<<"$out" && fail "recover on a boundary transcript leaked a post-compaction turn"
+grep -q "Summary of the first window" <<<"$out" && fail "recover returned the summary message as a turn"
+grep -q "transcript event $bidx of" <<<"$out" || fail "the recover note does not name the compact_boundary entry's index ($bidx)"
+# The arc numbering counts boundaries: one in the transcript, so PreCompact writes -2 for the current window.
+echo '{"session_id":"bnd","transcript_path":"'"$B"'","hook_event_name":"PreCompact"}' | node "$S" --hook --role user --max-chars 9000
+[ -s "$W/data/arc-bnd-2.txt" ] || fail "the arc was not numbered 2 after one compact_boundary entry"
+[ -e "$W/data/arc-bnd-1.txt" ] && fail "arc-bnd-1.txt exists: the quoting turn was counted as a boundary"
+grep -q "AFTER BOUNDARY" "$W/data/arc-bnd-2.txt" || fail "the arc is missing the current window's turn"
+grep -q "LAST BEFORE BOUNDARY\|QUOTED PHRASE" "$W/data/arc-bnd-2.txt" && fail "the arc crossed the compact_boundary entry"
+grep -q "Summary of the first window" "$W/data/arc-bnd-2.txt" && fail "the arc kept the summary message"
+# The live fallback closes the window at the boundary, not at the quoting turn.
+out=$(echo '{"session_id":"bnd2","transcript_path":"'"$B"'","hook_event_name":"SessionStart","source":"compact"}' | node "$S" --hook --role user --max-chars 9000)
+grep -q "LAST BEFORE BOUNDARY" <<<"$out" || fail "the live fallback on a boundary transcript missed the last turn before the boundary"
+grep -q "QUOTED PHRASE" "$W/data/arc-bnd2-1.txt" || fail "the fallback's arc for the closed window is missing the quoting turn (taken as a boundary?)"
+grep -q "AFTER BOUNDARY" "$W/data/arc-bnd2-1.txt" && fail "the fallback's arc leaked a turn from after the boundary"
+# --probe reports the engine's numbers from compactMetadata, per boundary.
+node "$S" --probe --file "$B" | python3 -c '
+import json,sys; p=json.load(sys.stdin); m=p["markers"]
+assert p["compactions"]==1, p
+assert p["boundary_source"]=="compact_boundary", p
+assert m[0]["index"]==int(sys.argv[1]) and m[0]["summary_index"]==int(sys.argv[1])+4, m   # three attachment entries between
+assert (m[0]["source"],m[0]["trigger"],m[0]["preTokens"],m[0]["postTokens"],m[0]["durationMs"],m[0]["preserved"])==("compact_boundary","auto",965550,25855,103240,7), m
+assert m[0]["at"]=="2026-09-27T15:33:49.229Z" and m[0]["summary_chars"]>0, m
+' "$bidx" || fail "--probe did not report the compact_boundary metadata"
+# A transcript with only the phrase (older Claude Code) still works, and says so.
+node "$S" --probe --file "$W/sess.jsonl" | python3 -c '
+import json,sys; p=json.load(sys.stdin); m=p["markers"]
+assert p["compactions"]==1 and p["boundary_source"]=="phrase", p
+assert m[0]["source"]=="phrase" and m[0]["preTokens"] is None and m[0]["preserved"] is None and m[0]["summary_chars"]>0, m
+' || fail "--probe on a phrase-only transcript did not fall back"
+node "$S" --probe --file "$W/pre.jsonl" | grep -q '"compactions":0,"boundary_source":null' || fail "--probe on a transcript with no compaction is not empty"
 echo "all checks passed"

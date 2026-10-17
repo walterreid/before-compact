@@ -12,7 +12,7 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 | `hooks/hooks.json` → `PreCompact` | before auto or manual compaction | writes your last turns (user role, ≤9000 chars) to `$CLAUDE_PLUGIN_DATA/precompact-<session>.txt` while the transcript is intact, and beside it the **arc**, `arc-<session>-<n>.txt`: the current window (the turns since the last compaction), both roles, assistant turns untruncated, noise stripped, no budget; one file per compaction |
 | `hooks/hooks.json` → `SessionStart (compact)` | right after compaction | prints that bundle (or, if none is fresh, extracts it live from the transcript); Claude Code adds the output to Claude's context. One factual line after the framing states where the newest arc file is, with its turn count and tokens, so the model can read it when a task needs what was done, not only what was said. The arc itself is never injected |
 | `skills/recover` → `/before-compact:recover` | on demand | the manual path, with knobs (`--turns`, `--role`, `--raw`, `--file`) |
-| `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
+| `scripts/extract_tail.mjs` | both | the original script, plus `--hook`, `--max-chars` and `--probe`. Every manual flag still works. Compaction boundaries are the transcript's `compact_boundary` entries (the phrase match is a fallback for older transcripts); `--probe` reports each boundary's engine numbers. With `inject_in_mod` on it also honours the mod's stand-down marker (below) |
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the instructions the summarizer was given, how long the summary took, and the summary itself. With `summary_instructions` set, appends that text to the instructions on the way down (see *The knob*). With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
 | `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status record the script writes inside those hooks' `next(e)`: the two ✓ marks |
 | `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, and a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it. Toasts when a compaction starts and finishes |
@@ -189,7 +189,7 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
-| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim | `node`, `python3` |
+| `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh and stale, `--raw` verbatim, and the boundary: a `compact_boundary` entry is what `--recover`, the arc numbering and `--probe` use (with its `compactMetadata` numbers), a turn quoting the phrase beside it is an ordinary turn, and a phrase-only transcript still works | `node`, `python3` |
 | `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the knob set and empty (what the engine's side receives), the experiment on and off, the error line | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
@@ -233,10 +233,10 @@ after a compaction) and with `--recover` (the button on tab 2). Nothing else.
   characters, written before each compaction and read back after it.
 - `$CLAUDE_PLUGIN_DATA/arc-<session id>-<n>.txt`: the back-and-forth of the window the
   compaction is about to summarize, that is, the turns after the most recent
-  compaction-summary marker in the transcript (the whole transcript before the first
+  compaction boundary in the transcript (the whole transcript before the first
   compaction); both roles, assistant turns untruncated, harness noise stripped, no
   character budget. One file per compaction, never overwritten: `n` is the number of
-  compaction markers already in the transcript plus one, so the first compaction writes
+  compaction boundaries already in the transcript plus one, so the first compaction writes
   `-1.txt`, the second `-2.txt`, each holding its own epoch. Written before each compaction
   beside the bundle (and by the SessionStart fallback when no bundle is fresh, for the
   window the new summary closed). Read by nothing automatically: the SessionStart output
@@ -295,12 +295,18 @@ per compaction, each the size of one window.
 - The arc has no budget, but it is bounded to one window: the turns since the last
   compaction. On a session that compacts often each arc stays the size of one epoch; the
   files accumulate under `$CLAUDE_PLUGIN_DATA` (one per compaction) until you delete them.
-- The window's boundary is the compaction-summary marker Claude Code writes into the
-  transcript (the "This session is being continued…" user turn), the same marker
-  `--recover` and `--probe` use. A user or assistant turn that quotes that phrase would
-  count as a boundary too.
+- The window's boundary is the `compact_boundary` entry Claude Code writes into the
+  transcript right before each summary message (type `system`, subtype `compact_boundary`,
+  carrying the engine's own `preTokens`, `postTokens`, `durationMs`, trigger and the list
+  of preserved messages). `--recover`, `--probe` and the arc numbering all use it, and
+  `--probe` reports those numbers per boundary. A transcript with no such entry (one an
+  older Claude Code wrote) falls back to the summary's opening phrase, "This session is
+  being continued…", and only there would a user or assistant turn quoting that phrase
+  count as a boundary; where a boundary entry exists, a quoting turn is an ordinary turn.
+  A transcript that has both kinds (compacted before and after an upgrade) uses the
+  entries alone, so its older, phrase-only compactions are not counted.
 - The PreCompact bundle is considered fresh for 15 minutes. After that SessionStart extracts
-  live from the transcript instead, using the compaction-summary marker to find the seam.
+  live from the transcript instead, using the newest compaction boundary to find the seam.
 - `$CLAUDE_PLUGIN_DATA` falls back to the OS temp dir when unset (for example when the
   script is run by hand), so bundles may not survive a reboot. The live path does not need them.
 - No automated check can trigger a real compaction, `claude plugin eval` included. See
