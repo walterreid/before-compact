@@ -18,7 +18,7 @@ decision actually got made. The summary flattens that. The raw last turns don't.
 | `hooks/register.js` → `session.compact` | every compaction | a **mod** hook: after the engine has compacted, records `tokensBefore` → `tokensAfter`, the message counts before → after, the trigger, the agent, the instructions the summarizer was given, how long the summary took, and the summary itself. On the way down, appends the `summary_instructions` text (by default the plugin's brief for the summarizer) to the instructions, after anything you typed (see *The brief*). With `inject_in_mod` on, returns the result with your last user turns appended after the summary (see *The experiment*) |
 | `hooks/register.js` → `classic.PreCompact`, `classic.SessionStart` | around each compaction | the same mod, reading the status records the script writes inside those hooks' `next(e)`, one per side: the ✓ marks, and the row's second `SessionStart` line for the assistant's turns. With `digest_in_precompact` on, `classic.PreCompact` also asks a model for a digest of the dialog and writes it to disk before the engine summarizes (see *Digest*) |
 | `hooks/brief.js` | every compaction | the default text of `summary_instructions`, the plugin's brief for the summarizer (see *The brief*) |
-| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the bundle that was re-injected, a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it, and a **Digest** tab beside it for the `digest_in_precompact` experiment. Toasts when a compaction starts and finishes |
+| `hooks/register.js` → `/before-compact` | on demand | the same mod's pane: a live context gauge, the compaction log above, a tab showing the two bundles that were saved for re-injection (your turns, then the assistant's, each under its own heading), a **Summary** tab showing the summary the engine installed with the token counts and the arc's size above it, and a **Digest** tab beside it for the `digest_in_precompact` experiment. Toasts when a compaction starts and finishes |
 | `types/index.d.ts` | load time | declares the two `$.state` values (the log, with each row's summary text and arc size, and the entry in flight) so the pane survives a reload of the mod; named by `types` in `plugin.json` |
 
 The two hooks are tiers 2 and 3 from the script's own header. Tier 1 (a "Compaction
@@ -68,8 +68,32 @@ The row's numbers are the engine's own: the `session.compact` event's result car
 every 2 s. The ✓ marks come from a status record the script writes to
 `~/.claude/before-compact/` inside each settings hook; a `?` means no record arrived (press
 `r`). Three ✓ marks and a drop in the numbers is what "compaction is working" looks like.
-Press `2` for the exact text of your turns that went back into context, `3` for the summary the engine
+Press `2` for the exact text that went back into context, `3` for the summary the engine
 installed, `4` for the digest the `digest_in_precompact` experiment wrote. Esc closes the pane.
+
+Press `2` for the **Last bundle** tab: the two bundles of the newest compaction, in the
+order the two SessionStart hooks print them, each under a one-line heading and each cut to
+9,500 characters for the pane on its own:
+
+    Your turns — 32 saved (~1k tokens), re-injected ~1k tokens:
+
+    ===== USER  [-32] =====
+    …
+    [32 turns (32 user / 0 assistant)  ·  ~1000 tokens  ·  source: …]
+
+    The assistant's turns — 7 saved (~2k tokens), re-injected ~2k tokens as a separate block:
+
+    ===== ASSISTANT  [-7] =====
+    …
+
+The user block's stats line counts only its own bundle, so it always says `0 assistant`:
+the assistant's turns are the second block, not missing. When there is no assistant bundle
+to show, one line in its place says why: the side is off (`assistant_turns`), its
+SessionStart hook stood down (`inject_in_mod`) and no file is on disk, the PreCompact hook
+did not write one, or no record came from that side (a row from before it existed; press
+`r`). With the side off or its save failed, a file left on disk by an earlier compaction is
+not shown. **Recover from transcript** (`g`) replaces the user block only: `--recover`
+reads the user side.
 
 Press `3` for the **Summary** tab: the summary the engine installed, verbatim (the first
 message of the `session.compact` result, capped at 9,500 characters for the pane), under
@@ -405,7 +429,7 @@ Three automated layers, all standalone: no session, no sign-in, no network.
 | Run | From | What it proves | Needs |
 | --- | --- | --- | --- |
 | `bash test/run.sh` | the repo root | the script: `--recover`, the budget, both hooks, the status record, the arc (written, longer than the bundle, bounded to the current window across three epochs, numbered per compaction, named by a factual pointer line with the stats line's own turn and token figures, the 9,000-char total), the stand-down marker fresh (both sides stand down, neither deletes it), older than the bundles (ignored) and stale (removed), `--raw` verbatim, the digest printed first and cut to 4,000 with the whole output under 9,000, a stale digest ignored, no digest leaving the output unchanged, the boundary: a `compact_boundary` entry is what `--recover`, the arc numbering and `--probe` use (with its `compactMetadata` numbers), a turn quoting the phrase beside it is an ordinary turn, and a phrase-only transcript still works; and the assistant side: the second bundle with no second arc, its framing, assistant turns and no user turn, no pointer line and no digest beside a fresh one, `--min-chars 200` dropping a short turn, `--assistant-max` live, under 9,000 chars, the live fallback, `assistant_turns=false` printing nothing with a recorded reason | `node`, `python3` |
-| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the brief at its default, the knob set to your own text and cleared (what the engine's side receives, and the rows), both experiments on and off (the digest's model call with the five headings in order, its file, its tab, a refused call), the newest-boundary line from a stubbed `--probe` (numbers, and the no-numbers case), the error line, and the assistant side's records drawing the row's second `SessionStart` line in its ✓, ?, – and ✗ states with the user line unchanged | Claude Code 2.1.287 or later |
+| `claude plugin test` | this folder | the mod, through simulated compactions with a stub mods API: the row's numbers from `session.compact`, both hook orders, precompute, veto, subagent rows, the Summary tab (text, numbers, arc size, the 9,500-char cut), the brief at its default, the knob set to your own text and cleared (what the engine's side receives, and the rows), both experiments on and off (the digest's model call with the five headings in order, its file, its tab, a refused call), the newest-boundary line from a stubbed `--probe` (numbers, and the no-numbers case), the error line, the assistant side's records drawing the row's second `SessionStart` line in its ✓, ?, – and ✗ states with the user line unchanged, and tab 2 drawing both bundles under their headings with a 9,500-char cut each, or the one line that says why the assistant's is absent | Claude Code 2.1.287 or later |
 | `claude plugin validate --strict .` | anywhere | the manifest, and a static list of every event the mod hooks and every API call it makes | any version |
 
 The same three run in GitHub Actions on every push to `main` and every pull request

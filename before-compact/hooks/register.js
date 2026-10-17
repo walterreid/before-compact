@@ -8,7 +8,8 @@
 //     BEFORE and AFTER (from the session.compact event itself), how long the
 //     summary took, what triggered it, and whether the two settings hooks in this
 //     plugin (PreCompact → save, SessionStart → re-inject) reported success
-//   • a second tab showing the actual bundle that was re-injected
+//   • a second tab showing the two bundles that were saved for re-injection, the
+//     user's turns and then the assistant's, each under its own heading
 //   • a third tab showing the summary the engine installed, with the token counts
 //     before and after and the size of the arc file on disk beside them, so a
 //     person can compare what the summary kept against what it cost
@@ -220,7 +221,10 @@ const pending = atom({ plugin: 'before-compact', key: 'pending' }, null)
 let tab = 'monitor'            // 'monitor' | 'bundle' | 'summary'
 let usage = null               // { tokens, window, percent } from $.session.usage(), for the gauge
 let messageCount = null        // length of $.session.messages(), for the gauge
-let bundleText = ''            // the last bundle, for the second tab
+let bundleText = ''            // the last user bundle (or --recover's output), for the second tab
+let bundleFrom = ''           // where bundleText came from: 'bundle' | 'recover' | ''
+let assistantText = ''        // the last assistant bundle, for the second tab
+let assistantWhy = ''         // with no assistantText: the one line that says why
 let digest = null              // the last digest record ({ at, model, chars, turns, text, … }), for the Digest tab
 let lastError = ''
 let compacting = false         // true while session.compact's next(e) runs for the main conversation
@@ -284,7 +288,8 @@ async function recoverFromTranscript($) {
     if (!path) { bundleText = ''; lastError = 'recover: no transcript found for this directory'; return }
     const r = await $.process.run(['node', await scriptPath($), '--recover', '--role', 'user', '--max-chars', '9000', '--file', path])
     const out = (r.stdout || '').trim()
-    bundleText = out.length > 9500 ? out.slice(0, 9500) + '\n…[truncated for the pane]' : out
+    bundleText = paneCut(out)
+    bundleFrom = out ? 'recover' : ''
     if (r.exitCode !== 0 && !out) lastError = 'recover: ' + errLine(r.stderr)
   } catch (e) { lastError = 'recover: ' + msg(e) }
   finally { recovering = false; $.ui.invalidate('ui.render') }
@@ -361,12 +366,39 @@ async function readStatus($) {
   } catch (e) { lastError = 'status: ' + msg(e); return [] }
 }
 
-async function loadBundle($, path) {
+// The pane's cut, per text: each bundle keeps its own 9,500 chars.
+function paneCut(t) { return t.length > 9500 ? t.slice(0, 9500) + '\n…[truncated for the pane]' : t }
+
+// Both bundles of a row, for tab 2: the user side's (c.bundle) and the assistant
+// side's (c.assistantBundle, folded from its own status record). With the
+// assistant side off or its save failed, the file on disk (if any) is an older
+// compaction's, so it is not read; the line says why instead.
+async function loadBundle($, c) {
   try {
-    if (!path || !(await $.fs.exists(path))) { bundleText = ''; return }
-    const t = await $.fs.read(path)
-    bundleText = t.length > 9500 ? t.slice(0, 9500) + '\n…[truncated for the pane]' : t
-  } catch (e) { bundleText = ''; lastError = 'bundle: ' + msg(e) }
+    if (!c || !c.bundle || !(await $.fs.exists(c.bundle))) { bundleText = ''; bundleFrom = '' }
+    else { bundleText = paneCut(await $.fs.read(c.bundle)); bundleFrom = 'bundle' }
+  } catch (e) { bundleText = ''; bundleFrom = ''; lastError = 'bundle: ' + msg(e) }
+  assistantText = ''
+  assistantWhy = ''
+  if (!c) return
+  const origin = c.assistantOrigin || ''
+  // The PreCompact record of a side that is off says written: false, turns: 0.
+  if (/^off\b/.test(origin) || (c.assistantSaved === false && c.assistantSavedTurns === 0)) {
+    assistantWhy = 'No assistant bundle: the assistant\'s turns are off (userConfig assistant_turns), so none was saved.'
+    return
+  }
+  if (c.assistantSaved === false) {
+    assistantWhy = `No assistant bundle: the assistant side's PreCompact hook says it did not write one${origin ? ` (its SessionStart hook: ${origin})` : ''}.`
+    return
+  }
+  try {
+    if (c.assistantBundle && (await $.fs.exists(c.assistantBundle))) { assistantText = paneCut(await $.fs.read(c.assistantBundle)); return }
+  } catch (e) { lastError = 'assistant bundle: ' + msg(e) }
+  assistantWhy = /^stood down\b/.test(origin)
+    ? `No assistant bundle on disk, and the assistant side's hook stood down (${origin}).`
+    : c.assistantPreAt == null && c.assistantPostAt == null
+      ? 'No assistant bundle: no status record from the assistant side for this compaction (a row from before that side existed, or press r).'
+      : `No assistant bundle on disk${c.assistantBundle ? ` at ${c.assistantBundle}` : ''}${origin ? ` (the assistant side's hook: ${origin})` : ''}.`
 }
 
 // The digest file the mod wrote before the last compaction (writeDigest), read
@@ -670,7 +702,7 @@ export function register(on, options) {
     const last = list[list.length - 1]
     const was = before[before.length - 1]
     if (last && last.postAt != null && !(was && was.postAt === last.postAt)) {
-      await loadBundle($, last.bundle)
+      await loadBundle($, last)
       await probeTranscript($)
       await loadDigest($)
       const t = last.injected
@@ -711,7 +743,7 @@ export function register(on, options) {
         tabButton('bundle', 'Last bundle', '2'),
         tabButton('summary', 'Summary', '3'),
         tabButton('digest', 'Digest', '4'),
-        Button({ key: 'refresh', label: 'Refresh', hotkey: 'r', plain: true, onPress: async () => { await refreshLive($); await syncStatus($); await probeTranscript($); await loadDigest($); const l = (await read($, compactions)); const last = l[l.length - 1]; if (last) await loadBundle($, last.bundle); redraw() } }),
+        Button({ key: 'refresh', label: 'Refresh', hotkey: 'r', plain: true, onPress: async () => { await refreshLive($); await syncStatus($); await probeTranscript($); await loadDigest($); const l = (await read($, compactions)); const last = l[l.length - 1]; if (last) await loadBundle($, last); redraw() } }),
       ],
     })
 
@@ -763,10 +795,26 @@ export function register(on, options) {
       }
     } else if (tab === 'bundle') {
       const recoverButton = Button({ key: 'recover', label: recovering ? 'Recovering…' : 'Recover from transcript', hotkey: 'g', onPress: () => { if (!recovering) recoverFromTranscript($) } })
-      body = bundleText
-        ? [Text({ dimColor: true, children: ['The last turns before the most recent compaction, as the hook put them back (or as --recover reads them from the transcript):'] }),
+      // Two blocks, as the two SessionStart hooks print them: the user's turns, then
+      // the assistant's. The user block's stats line counts only the user side's
+      // bundle ("N user / 0 assistant"); the assistant's turns are the second block.
+      const last = list.length ? list[list.length - 1] : null
+      const userHeading = bundleFrom === 'recover'
+        ? 'Your turns — read by --recover from the transcript (the user side only):'
+        : `Your turns — ${last && last.savedTurns != null ? `${last.savedTurns} saved (~${fmtK(last.savedTokens)} tokens)` : 'the user side\'s bundle'}${last && last.injected ? `, re-injected ~${fmtK(last.injectedTokens)} tokens` : ''}:`
+      const assistantHeading = !last ? 'The assistant\'s turns:' : `The assistant's turns — ${last && last.assistantSavedTurns != null ? `${last.assistantSavedTurns} saved (~${fmtK(last.assistantSavedTokens)} tokens)` : 'the assistant side\'s bundle'}${last && last.assistantInjected ? `, re-injected ~${fmtK(last.assistantTokens)} tokens as a separate block` : last && last.assistantInjected === false ? ', not re-injected' : ''}:`
+      body = bundleText || assistantText
+        ? [Text({ dimColor: true, children: ['The last turns before the most recent compaction, as the hooks put them back (or as --recover reads them from the transcript):'] }),
            Text({ children: [' '] }),
-           Text({ wrap: 'wrap', children: [bundleText] }),
+           Text({ bold: true, children: [userHeading] }),
+           bundleText
+             ? Text({ wrap: 'wrap', children: [bundleText] })
+             : Text({ dimColor: true, children: ['No user bundle on disk for this compaction.'] }),
+           Text({ children: [' '] }),
+           Text({ bold: true, children: [assistantHeading] }),
+           assistantText
+             ? Text({ wrap: 'wrap', children: [assistantText] })
+             : Text({ dimColor: true, children: [assistantWhy || (last ? 'No assistant bundle loaded (press r).' : 'No compaction watched this session, so no assistant bundle; --recover reads the user side only.')] }),
            Text({ children: [' '] }),
            recoverButton]
         : [Text({ dimColor: true, children: ['No saved bundle for this session yet. One is written by the next compaction (run /compact to try it).'] }),

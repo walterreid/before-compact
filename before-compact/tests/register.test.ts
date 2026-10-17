@@ -605,6 +605,59 @@ test('the assistant side off, stood down, or with nothing to inject: a dash, a d
   await ui.unmount()
 })
 
+test('tab 2 draws both bundles, the user\'s then the assistant\'s, each under its own heading and its own pane cut', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  // The assistant bundle is longer than the pane's 9,500 chars; the user bundle is the stub's short one.
+  const A_TEXT = 'THE ASSISTANT CONCLUDED ' + 'x'.repeat(9600)
+  stubs($, on, status, { [BUNDLE_A]: A_TEXT })
+  on('session.compact', () => ({ messages: [SUMMARY, ...transcript(6)], tokensBefore: 82000, tokensAfter: 19000 }))
+
+  status.log = [PRE, PRE_A]
+  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: SESSION, transcript_path: '/x.jsonl', trigger: 'manual' })
+  await $.session.compact({ trigger: 'manual', messages: transcript(143) } as any)
+  status.log = [PRE, PRE_A, POST, POST_A]
+  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: SESSION, transcript_path: '/x.jsonl', source: 'compact' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-bundle' })
+  expect(await ui.find({ type: 'Text', text: 'Your turns — 32 saved (~1k tokens), re-injected ~1k tokens:' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'LAST BEFORE COMPACTION' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'The assistant\'s turns — 7 saved (~2k tokens), re-injected ~2k tokens as a separate block:' })).toBeDefined()
+  // The assistant bundle keeps its own cut: its first 9,500 chars and the marker; the user bundle is whole.
+  expect(await ui.find({ type: 'Text', text: A_TEXT.slice(0, 9500) + '\n…[truncated for the pane]' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^No assistant bundle/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
+
+test('tab 2 with no assistant bundle: one line that says why (off, stood down, no record)', async ($, on) => {
+  const status = { log: [] as unknown[] }
+  stubs($, on, status)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-bundle' })
+  const cases: [unknown[], RegExp][] = [
+    [[POST, { ...POST_A, injected: false, origin: 'off: the assistant_turns option is false' }],
+      /^No assistant bundle: the assistant's turns are off \(userConfig assistant_turns\), so none was saved\.$/],
+    [[POST, { ...POST_A, injected: false, origin: 'stood down: the mod appended 3 user turns after the summary', mod_appended: 3, mod_chars: 18 }],
+      /^No assistant bundle on disk, and the assistant side's hook stood down \(stood down: the mod appended 3 user turns after the summary\)\.$/],
+    [[POST],
+      /^No assistant bundle: no status record from the assistant side for this compaction/],
+  ]
+  for (const [i, [records, why]] of cases.entries()) {
+    // Each case is a new compaction: its own `at`s, so the fold makes a new row and tab 2 reads the newest.
+    status.log = [...status.log, ...records.map((r: any) => ({ ...r, at: `2026-10-16T15:0${i}:0${r.side === 'assistant' ? 5 : 0}.000Z` }))]
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ type: 'Text', text: /^Your turns — / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'LAST BEFORE COMPACTION' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^The assistant's turns/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: why })).toBeDefined()
+  }
+  expect(await ui.find({ type: 'Text', text: /last error/ })).toBeUndefined()
+  await ui.press({ key: 'tab-monitor' })
+  await ui.unmount()
+})
+
 // --- the digest experiment (userConfig digest_in_precompact) ----------------------
 // The kit seeds the flag through test(name, { options }, body). What these prove: with
 // the flag off no model call and no write; with it on, one $.model.complete call whose
