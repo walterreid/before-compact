@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/walterreid/before-compact"
 license: MIT
 date-released: 2026-10-16
-version: 0.2.0
+version: 0.3.0
 keywords:
   - claude-code
   - plugin
