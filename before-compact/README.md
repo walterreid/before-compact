@@ -624,3 +624,13 @@ per compaction, each the size of one window.
   `classic.SessionStart` hooks have passed the event on with `next(e)`, on the reading
   that the settings hooks run inside that `next`. There are no timers. If that reading
   is wrong for your build, a row shows `?` for the save or the inject; press `r`.
+
+## Support
+
+Questions, bugs and suggestions go to the plugin's author, Walter Reid:
+
+- open an issue at <https://github.com/walterreid/before-compact/issues>, or
+- email walterreid@gmail.com.
+
+For a pane problem, include the pane's `(last error: …)` line if it shows one, and the
+Claude Code version from `claude --version`.
