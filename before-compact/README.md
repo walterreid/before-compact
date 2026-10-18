@@ -634,3 +634,9 @@ Questions, bugs and suggestions go to the plugin's author, Walter Reid:
 
 For a pane problem, include the pane's `(last error: …)` line if it shows one, and the
 Claude Code version from `claude --version`.
+
+## Privacy
+
+The plugin reads the current session's transcript and keeps what it saves on your machine;
+it sends nothing to the author or to any service of its own. The full policy is in
+[PRIVACY.md](PRIVACY.md).
