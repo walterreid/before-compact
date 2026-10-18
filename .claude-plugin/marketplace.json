@@ -12,7 +12,33 @@
       "source": "./before-compact",
       "description": "Keeps your last turns, verbatim, across a Claude Code compaction: a PreCompact hook saves them and the window's full arc, a SessionStart hook puts them back, and the /before-compact pane shows each compaction's numbers, the engine's summary, and what was re-injected.",
       "category": "context",
-      "tags": ["compact", "compaction", "context-window", "memory", "mod"]
+      "tags": [
+        "compact",
+        "compaction",
+        "context-window",
+        "memory",
+        "mod"
+      ]
+    },
+    {
+      "name": "build-contract",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/walterreid/build-contract.git",
+        "path": "contract",
+        "ref": "v1.4.0",
+        "sha": "d7413067f5607c50f7f276399ebdbcc06d626ac0"
+      },
+      "description": "The Build Contract: a seven-document system for long, multi-session AI builds \u2014 tiered rules with a real amendment channel, a handoff maintained from day zero, and a read-receipt gate. The blueprint for the last 10%. Skills and templates only; no hooks.",
+      "category": "context",
+      "tags": [
+        "handoff",
+        "multi-session",
+        "context",
+        "agents-md",
+        "documentation",
+        "adoption"
+      ]
     }
   ]
 }
