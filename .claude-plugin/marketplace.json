@@ -26,8 +26,8 @@
         "source": "git-subdir",
         "url": "https://github.com/walterreid/build-contract.git",
         "path": "contract",
-        "ref": "v1.4.2",
-        "sha": "beca97a76e7036f44a73baa12cdd1473d6584287"
+        "ref": "v1.4.3",
+        "sha": "e66f7722a38ff4d5d7a11a9a2e013b7687339c20"
       },
       "description": "The Build Contract: a seven-document system for long, multi-session AI builds \u2014 tiered rules with a real amendment channel, a handoff maintained from day zero, and a read-receipt gate. The blueprint for the last 10%. Skills and templates only; no hooks.",
       "category": "context",
