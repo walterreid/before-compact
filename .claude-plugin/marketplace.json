@@ -1,6 +1,6 @@
 {
   "name": "walterreid-plugins",
-  "description": "Claude Code plugins by Walter Reid. before-compact keeps your last turns, verbatim, across a compaction, and shows what each compaction did.",
+  "description": "Claude Code plugins by Walter Reid. before-compact keeps your last turns, verbatim, across a compaction, and shows what each compaction did. pushgenius-notify pushes a notification to your phone when Claude finishes or needs you.",
   "owner": {
     "name": "Walter Reid",
     "email": "walterreid@gmail.com",
@@ -29,7 +29,7 @@
         "ref": "v1.4.3",
         "sha": "e66f7722a38ff4d5d7a11a9a2e013b7687339c20"
       },
-      "description": "The Build Contract: a seven-document system for long, multi-session AI builds \u2014 tiered rules with a real amendment channel, a handoff maintained from day zero, and a read-receipt gate. The blueprint for the last 10%. Skills and templates only; no hooks.",
+      "description": "The Build Contract: a seven-document system for long, multi-session AI builds — tiered rules with a real amendment channel, a handoff maintained from day zero, and a read-receipt gate. The blueprint for the last 10%. Skills and templates only; no hooks.",
       "category": "context",
       "tags": [
         "handoff",
@@ -38,6 +38,24 @@
         "agents-md",
         "documentation",
         "adoption"
+      ]
+    },
+    {
+      "name": "pushgenius-notify",
+      "source": {
+        "source": "github",
+        "repo": "walterreid/pushgenius-notify",
+        "ref": "v0.1.0",
+        "sha": "96ffefbe028d82970bfacec07c3912af23c61b70"
+      },
+      "description": "Pushes a PushGenius notification to your phone or browser when Claude Code finishes a turn, hits an API error, or stops to ask you something. Stop, StopFailure and Notification hooks, one shell script, your own PushGenius app and REST key.",
+      "category": "notifications",
+      "tags": [
+        "notifications",
+        "push",
+        "pushgenius",
+        "hooks",
+        "mobile"
       ]
     }
   ]
