@@ -45,10 +45,10 @@
       "source": {
         "source": "github",
         "repo": "walterreid/pushgenius-notify",
-        "ref": "v0.1.0",
-        "sha": "96ffefbe028d82970bfacec07c3912af23c61b70"
+        "ref": "v0.1.1",
+        "sha": "4a8c722bc9f3fe763d2fec47daeeb9098daf315e"
       },
-      "description": "Pushes a PushGenius notification to your phone or browser when Claude Code finishes a turn, hits an API error, or stops to ask you something. Stop, StopFailure and Notification hooks, one shell script, your own PushGenius app and REST key.",
+      "description": "Pushes a PushGenius notification to your phone or browser when Claude Code finishes a turn, hits an API error, or stops to ask you something. Every event has an on/off switch in /config or via /pushgenius-notify:events.",
       "category": "notifications",
       "tags": [
         "notifications",
